@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import statsmodels as sm
 
-nu_idx_set =  ["ntuple","entry","rec.mc.nu__index"]
+nu_idx_set =  ["ntuple","entry"]
 slc_idx_set = ["ntuple","entry","rec.slc__index"]
 
 def flatten_df(df: pd.DataFrame): 
