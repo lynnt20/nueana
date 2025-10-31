@@ -1,5 +1,5 @@
 """Configurations and constants."""
-
+import seaborn as sns
 # dictionary mapping signal to ints. Signal == 0 is assumed to be the desired topology. 
 signal_dict = {"nueCC":0,"numuCCpi0":1,"NCpi0":2,"othernumuCC":3,"othernueCC": 4,"otherNC":5, "nonFV":6 ,"dirt":7,"cosmic":8}
 signal_labels = [r"CC $\nu_e$",
@@ -13,7 +13,9 @@ signal_labels = [r"CC $\nu_e$",
                  "cosmic"]
 
 # default colors used for plotting 
-colors = ["C0", "C1", "C2", "C3", "darkslateblue", "C4", "C5", "C6","C7"]
+signal_colors = ["C0", "C1", "C2", "C3", "darkslateblue", "C4", "C5", "C6","C7"]
+pdg_colors = sns.color_palette("deep")
+pdg_colors.insert(4,"darkblue")
 
 # dictionary mapping particle to pdg code, used for plotting
 pdg_dict = {
