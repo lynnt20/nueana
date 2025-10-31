@@ -21,6 +21,7 @@ def plot_var(df,
              mult_factor: float = 1.0,
              cut_val: list = None,
              plot_err: bool = True,
+             systs_err: np.ndarray = None, 
              pdg: bool = False,
              pdg_col: tuple | str = 'pfp_shw_truth_p_pdg',
              hatch: list = None,):
@@ -54,6 +55,8 @@ def plot_var(df,
         if specified, plots vertical lines at the specified values
     plot_err: bool
         if True, adds hatching to plot statistical error
+    systs_err: np.ndarray
+        if provided, will add this error inside the stat. err 
     pdg: bool
         if True, splits by true PDG instead of signal type 
     pdg_col: tuple | str
@@ -64,10 +67,8 @@ def plot_var(df,
     """
     if (type(df) is not list): df = [df]
     if scale == None: scale = list(np.ones(len(df)))
-    if (len(scale) != len(df)): 
-        print("Error: scale must be the same length as df")
-        return 
-
+    assert (len(scale) == len(df))
+    assert (len(systs_err) == (len(bins)-1))
         
     # Defensive: ensure DataFrame axes are fully lexsorted when using MultiIndex
     # This avoids pandas PerformanceWarning about indexing past lexsort depth
@@ -96,8 +97,8 @@ def plot_var(df,
     hists   = np.zeros((ncategories,len(bin_steps))) # this is for storing the histograms
     steps   = np.zeros((ncategories,len(bins))) # this is for plotting
     
-    binned_stats = np.zeros((len(bin_steps),len(df)))
-    binned_err   = np.zeros(len(bin_steps))
+    stats = np.zeros((len(bin_steps),len(df)))
+    stats_err   = np.zeros(len(bin_steps))
     
     df_counter = 0
     if pdg==False: 
@@ -105,7 +106,7 @@ def plot_var(df,
             for i, entry in enumerate(signal_dict):
                 this_signal_val = signal_dict[entry]
                 hist, bin_edges = np.histogram(this_df[this_df.signal==this_signal_val][var],bins=bins)
-                binned_stats[:,df_counter] += hist
+                stats[:,df_counter] += hist
                 hists[i] = hists[i] + this_scale*hist
             df_counter += 1
 
@@ -121,7 +122,7 @@ def plot_var(df,
                 pdg_value = pdg_dict[key]['pdg']
                 pdg_df = this_nu_df[abs(this_nu_df[pdg_col])==pdg_value].sort_index()
                 hist, _____ = np.histogram(pdg_df[var],bins=bins)
-                binned_stats[:,df_counter] += hist
+                stats[:,df_counter] += hist
                 hists[i] = hists[i] + this_scale*hist
                 # remove the "good pdg" from other_df
                 this_other = this_other[abs(this_other[pdg_col])!=pdg_value]
@@ -149,12 +150,12 @@ def plot_var(df,
 
     # statistical error is only on the input statistics, and the we rescale 
     for i in range(len(bin_steps)): 
-        binned_err[i] = np.sqrt(np.sum(binned_stats[i,:]*(np.array(scale)**2)))
+        stats_err[i] = np.sqrt(np.sum(stats[i,:]))*np.array(scale)
     
     if normalize:
         norm_factor = np.sum(hists) * np.diff(bins)
         hists = hists / norm_factor
-        binned_err = binned_err / norm_factor
+        stats_err = stats_err / norm_factor
         
     for i in range(ncategories):
         plot_label = (list(pdg_dict.keys())+['cosmic']+['other'])[i] if pdg else signal_labels[i]
@@ -170,14 +171,25 @@ def plot_var(df,
                          lw=1.5, 
                          hatch=hatch[i],zorder=(ncategories-i),label=plot_label)
     if plot_err: 
+        stats_options = {"step":"pre", "color":mpl.colors.to_rgba("gray", alpha=0.9),
+                         "lw":0.0,"facecolor":"none","hatch":"....",
+                         "zorder":ncategories+1}
+        systs_options = {"step":"pre", "color":mpl.colors.to_rgba("gray", alpha=0.8),
+                         "lw":0.0,"facecolor":"none","hatch":"xxx",
+                         "zorder":ncategories+1}
         # fill between needs the last entry to be repeated...
-        minus_err = steps[-1] - np.append(binned_err,binned_err[-1])
-        plus_err  = steps[-1] + np.append(binned_err,binned_err[-1])
-        ax.fill_between(bins, minus_err, plus_err, step="pre", 
-                        color=mpl.colors.to_rgba("gray", alpha=0.8),
-                        lw=0.0,facecolor="none",
-                        hatch="xxxxx",
-                        zorder=ncategories+1,label="MC stat. err.")
+        if len(systs_err)!=0:
+            min_systs_err = steps[-1] - np.append(systs_err,systs_err[-1])
+            pls_systs_err = steps[-1] + np.append(systs_err,systs_err[-1])
+            min_stats_err = min_systs_err - np.append(stats_err,stats_err[-1])
+            pls_stats_err = pls_systs_err + np.append(stats_err,stats_err[-1])
+            ax.fill_between(bins, min_systs_err, pls_systs_err, **systs_options,label="MC syst.")
+            ax.fill_between(bins, min_systs_err, min_stats_err, **stats_options,label="MC stat.")
+            ax.fill_between(bins, pls_systs_err, pls_stats_err, **stats_options)
+        else: 
+            min_stats_err = steps[-1] - np.append(stats_err,stats_err[-1])
+            pls_stats_err = steps[-1] + np.append(stats_err,stats_err[-1])
+            ax.fill_between(bins, min_stats_err, pls_stats_err, **stats_options,label="MC stat.")
 
     if cut_val != None:
         for i in range(len(cut_val)):
@@ -191,7 +203,7 @@ def plot_var(df,
     ax.set_title (var)      if title  == "" else ax.set_title (title)
     ax.legend()
 
-    return bins, steps, binned_err
+    return bins, steps, stats_err
 
 # added for backward compatibility 
 def plot_var_pdg(**args):
