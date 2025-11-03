@@ -67,7 +67,7 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
         If True, normalize histograms so integral equals 1 (uses bin widths from ``bins``).
     mult_factor : float, default 1.0
         Multiplicative factor applied to the first category (index 0). Intended for quick
-        visual scaling only; error propagation is not adjusted beyond simple scaling.
+        visual scaling only; error propagation is not adjusted at all. 
     cut_val : list, optional
         List of x-values at which to draw vertical cut lines.
     plot_err : bool, default True
