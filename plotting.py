@@ -2,7 +2,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
 from matplotlib.gridspec import GridSpec
-from matplotlib.patches import Patch
 import pandas as pd
 
 from .constants import signal_dict, signal_labels, pdg_dict, signal_colors, pdg_colors
@@ -162,6 +161,7 @@ def plot_var(df,
         if counts: plot_label += f" ({int(hist_counts[i]):,})" if hist_counts[i] < 1e6 else f"({hist_counts[i]:.2e}"
         
         bottom=steps[i-1] if i>0 else 0
+        # steps needs the first entry to be repeated!
         steps[i] = np.insert(hists[i],obj=0,values=hists[i][0]) + bottom; 
 
         ax.fill_between(bins, bottom, steps[i], step="pre", 
@@ -176,7 +176,7 @@ def plot_var(df,
         systs_options = {"step":"pre", "color":mpl.colors.to_rgba("gray", alpha=0.8),
                          "lw":0.0,"facecolor":"none","hatch":"xxx",
                          "zorder":ncategories+1}
-        # fill between needs the last entry to be repeated...
+        # fill_between needs the last entry to be repeated...
         if len(systs_err)!=0:
             min_systs_err = steps[-1] - np.append(systs_err,systs_err[-1])
             pls_systs_err = steps[-1] + np.append(systs_err,systs_err[-1])
@@ -193,6 +193,10 @@ def plot_var(df,
     if cut_val != None:
         for i in range(len(cut_val)):
             ax.axvline(cut_val[i],lw=2,color="gray",linestyle="--",zorder=6)
+    
+    total_err = stats_err 
+    if len(systs_err)!=0: 
+        total_err += systs_err
 
     # * if this is a multiindex dataframe, recast `var` 
     # * (since we're done using it) to be nice as a string!
@@ -202,7 +206,7 @@ def plot_var(df,
     ax.set_title (var)      if title  == "" else ax.set_title (title)
     ax.legend()
 
-    return bins, steps, stats_err
+    return bins, steps, total_err
 
 # added for backward compatibility 
 def plot_var_pdg(**args):
