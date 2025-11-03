@@ -1,3 +1,14 @@
+"""Useful plotting helpers for nueana: stacked MC, PDG breakdowns, and data overlays.
+
+This module provides:
+- plot_var: unified function to plot either signal-type stacks or PDG-type stacks.
+- data_plot_overlay: draw data points with Poisson errors on top of MC stacks.
+- plot_mc_data: convenience function that builds an MC+data figure with ratio subplot.
+
+All functions accept both plain and MultiIndex DataFrames (the code will attempt to
+ensure lexsorted axes via ``ensure_lexsorted`` imported from ``.utils``).
+"""
+
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib as mpl
@@ -7,63 +18,77 @@ import pandas as pd
 from .constants import signal_dict, signal_labels, pdg_dict, signal_colors, pdg_colors
 from .utils import ensure_lexsorted
 
-def plot_var(df, 
-             var: tuple | str, 
+def plot_var(df: pd.DataFrame | list[pd.DataFrame],
+             var: tuple | str,
              bins: np.ndarray,
              ax = None,
-             xlabel: str = "", 
-             ylabel: str= "",
+             xlabel: str = "",
+             ylabel: str = "",
              title: str = "",
              counts: bool = False,
-             scale: list = None,
+             scale: list[float] | None = None,
              normalize: bool = False,
              mult_factor: float = 1.0,
-             cut_val: list = None,
+             cut_val: list[float] | None = None,
              plot_err: bool = True,
-             systs: np.ndarray = np.array([]), 
+             systs: np.ndarray = np.array([]),
              pdg: bool = False,
              pdg_col: tuple | str = 'pfp_shw_truth_p_pdg',
-             hatch: list = None,):
-    """
-    Plots a variable for each interaction type in a histogram.
-    
+             hatch: list[str] | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Plot a variable as stacked histograms for signal categories or PDG types.
+
+    This function supports two modes controlled by ``pdg``:
+    - pdg=False (default): stack by interaction type using ``signal_dict`` / ``signal_colors``.
+    - pdg=True: stack by particle PDG using ``pdg_dict`` / ``pdg_colors``; adds 'cosmic' and
+      'other' as the last two categories.
+
     Parameters
     ----------
-    df: input dataframe or list of dataframes
-    var: tuple | str
-        variable to be plotted, must be a column in the dataframe
-    bins: np.ndarray
-        histogram binning
-    ax: matplotlib.axes.Axes
-        axes to plot on, if None, uses the current axes
-    label: str
-        x-axis label. If empty, uses the variable name
-    ylabel: str
-        y-axis label.
-    title: str
-        title of the plot
-    counts: bool
-        if True, adds the number of events to the label for the legends
-    scale: list of floats
-        if specified, scales the histograms from df by the specified values 
-    normalize: bool
-        if True, normalizes the histogram such that the area under the curve sums to 1
-    mult_factor: float
-        if specified, multiplies the signal histogram by this factor
-    cut_val: list
-        if specified, plots vertical lines at the specified values
-    plot_err: bool
-        if True, adds hatching to plot statistical error
-    systs: np.ndarray
-        if provided, will add this error inside the stat. err 
-        The shape should be (ncounts, ndfs).
-    pdg: bool
-        if True, splits by true PDG instead of signal type 
-    pdg_col: tuple | str
-        The column that stores true pdg on a pfp level. 
-        Should be `pfp_shw_truth_p_pdg` for flattened df. 
-    hatch: list
-        if provided, will add hatching to the histogram
+    df : pandas.DataFrame or list[pandas.DataFrame]
+        Input dataframe(s). If a single DataFrame is provided it will be wrapped in a list.
+    var : tuple | str
+        Column name (or multi-index tuple) to histogram.
+    bins : np.ndarray
+        Bin edges for the histogram.
+    ax : matplotlib.axes.Axes, optional
+        Axis to draw on. If None the current axis is used.
+    xlabel : str, optional
+        X axis label. Defaults to the variable name when empty.
+    ylabel : str, optional
+        Y axis label. Defaults to 'Counts' when empty.
+    title : str, optional
+        Plot title. Defaults to the variable name when empty.
+    counts : bool, default False
+        If True, append event counts to legend labels.
+    scale : list[float], optional
+        Per-DataFrame scale factors. If None, all scales are 1.0. Length must equal number of
+        input DataFrames.
+    normalize : bool, default False
+        If True, normalize histograms so integral equals 1 (uses bin widths from ``bins``).
+    mult_factor : float, default 1.0
+        Multiplicative factor applied to the first category (index 0). Intended for quick
+        visual scaling only; error propagation is not adjusted beyond simple scaling.
+    cut_val : list, optional
+        List of x-values at which to draw vertical cut lines.
+    plot_err : bool, default True
+        If True, draw MC statistical (and optional systematic) error bands.
+    systs : numpy.ndarray, shape=(n_bins, n_dfs), optional
+        Optional per-bin systematic contributions for each input dataframe. If provided its
+        shape must be (n_bins, n_dfs). Default is an array of zeros.
+    pdg : bool, default False
+        When True, split histograms by PDG (uses ``pdg_col``). Otherwise split by signal type.
+    pdg_col : tuple | str, default 'pfp_shw_truth_p_pdg'
+        Column (or multi-index tuple) containing the PDG code per particle (used when ``pdg``
+        is True).
+    hatch : list, optional
+        Optional hatch patterns per category.
+
+    Returns
+    -------
+    bins, steps, total_err
+        - bins: the input bin edges
+        - steps: array of cumulative step values used for plotting (shape (n_categories, len(bins)))
+        - total_err: combined stat + syst per bin (length = n_bins)
     """
     if (type(df) is not list): df = [df]
     if scale == None: scale = list(np.ones(len(df)))
@@ -212,9 +237,49 @@ def plot_var(df,
 
 # added for backward compatibility 
 def plot_var_pdg(**args):
+    """Backward-compatible wrapper for plotting by PDG.
+
+    Parameters
+    ----------
+    **args : dict
+        All keyword arguments are forwarded to :func:`plot_var`. Key arguments are
+        documented there; this wrapper simply calls ``plot_var(pdg=True, **args)``.
+
+    Returns
+    -------
+    tuple
+        The same (bins, steps, total_err) tuple returned by :func:`plot_var`.
+    """
     return plot_var(pdg=True,**args)
 
-def data_plot_overlay(df, var, bins,ax=None,normalize=False):
+def data_plot_overlay(df: pd.DataFrame,
+                      var: str | tuple,
+                      bins: list[float] | np.ndarray,
+                      ax = None,
+                      normalize: bool = False) -> tuple[np.ndarray, np.ndarray, object]:
+    """Overlay data as points with Poisson errors on an axis.
+
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        Dataframe containing the data to plot. ``var`` must be a column name or
+        a tuple for MultiIndex columns.
+    var : str | tuple
+        Column to histogram.
+    bins : array-like
+        Bin edges for the histogram.
+    ax : matplotlib.axes.Axes, optional
+        Axis to draw on. If None the current axis is used.
+    normalize : bool, default False
+        If True, normalize the histogram by its integral (uses bin widths).
+
+    Returns
+    -------
+    hist, errors, plot
+        - hist: per-bin counts (or normalized values)
+        - errors: per-bin sqrt(hist) (or normalized errors)
+        - plot: the Artist returned by ax.errorbar
+    """
     if ax is None:
         ax = plt.gca()
 
@@ -232,24 +297,74 @@ def data_plot_overlay(df, var, bins,ax=None,normalize=False):
     plot = ax.errorbar(bin_centers, hist, yerr=errors, fmt='.',color='black',zorder=1e3,label='data')
     return hist, errors, plot
 
-def plot_mc_data(mc_dfs, data_df, var, bins, 
-                 scale=None, pdg=False,
-                 xlabel="", ylabel="", title="", 
-                 normalize=False,
-                 systs=np.array([]),
-                 figsize = (7, 6),
-                 cut_val = [],
-                 ratio_min=0.0, ratio_max=2.0,
-                 hatch=None,
-                 savefig=""):
+def plot_mc_data(mc_dfs: pd.DataFrame | list[pd.DataFrame],
+                 data_df: pd.DataFrame,
+                 var: str | tuple,
+                 bins: list[float] | np.ndarray,
+                 scale: list[float] | None = None,
+                 pdg: bool = False,
+                 xlabel: str = "",
+                 ylabel: str = "",
+                 title:  str = "",
+                 normalize: bool = False,
+                 systs: np.ndarray = np.array([]),
+                 figsize: tuple[int, int] = (7, 6),
+                 cut_val: list[float] = [],
+                 ratio_min: float = 0.0,
+                 ratio_max: float = 2.0,
+                 hatch: list[str] | None = None,
+                 savefig: str = "") -> tuple[plt.Figure, plt.Axes, plt.Axes]:
+    """Create a combined MC stack + data overlay plot with data/MC ratio subplot.
+
+    Parameters
+    ----------
+    mc_dfs : pandas.DataFrame or list[pandas.DataFrame]
+        MC dataframe(s) to be stacked. If a single DataFrame is provided it will be wrapped in a list.
+    data_df : pandas.DataFrame
+        Dataframe containing observed data to overlay as points with errors.
+    var : str | tuple
+        Column (or multi-index tuple) to histogram.
+    bins : array-like
+        Bin edges for the histograms.
+    scale : list[float], optional
+        Scaling factors applied to each MC dataframe. If None, all scales are 1.0.
+    pdg : bool, default False
+        If True, instruct `plot_var` to split MC by PDG instead of signal type.
+    xlabel, ylabel, title : str, optional
+        Labels and title for the main axis. If blank, sensible defaults are used.
+    normalize : bool, default False
+        If True, normalize both MC and data histograms to unit area.
+    systs : numpy.ndarray, optional
+        Optional systematic contribution per bin per MC input (shape (n_bins, n_dfs)).
+    figsize : tuple, default (7, 6)
+        Figure size.
+    cut_val : list, optional
+        x-values at which to draw vertical cut lines on both main and ratio axes.
+    ratio_min, ratio_max : float, default (0.0, 2.0)
+        y-limits for the ratio subplot.
+    hatch : list, optional
+        Hatch patterns passed to `plot_var`.
+    savefig : str, optional
+        If provided, path where the figure will be saved (bbox_inches='tight').
+
+    Returns
+    -------
+    fig, ax_main, ax_sub
+        The created matplotlib Figure and the main and ratio Axes.
+    """
     fig = plt.figure(figsize=figsize)
     gs = GridSpec(2, 1, height_ratios=[6, 1], hspace=0.4)
     ax_main = fig.add_subplot(gs[0])
     ax_sub = fig.add_subplot(gs[1])
 
-    data_hist, data_err, data_plot= data_plot_overlay(data_df, var, bins, ax=ax_main, normalize=normalize)
-    mc_bins, mc_steps, mc_err = plot_var(df=mc_dfs, var=var, bins=bins, scale=scale,ax=ax_main, normalize=normalize,pdg=pdg,
-                                         xlabel=xlabel,ylabel=ylabel,title=title,hatch=hatch,systs=systs)
+    data_args = dict(df=data_df, var=var, bins=bins, ax=ax_main, normalize=normalize)
+    mc_args   = dict(df=mc_dfs,  var=var, bins=bins, ax=ax_main, normalize=normalize,
+                     scale=scale, systs=systs, hatch=hatch,
+                     xlabel=xlabel, ylabel=ylabel,title=title)
+
+    data_hist, data_err, data_plot = data_plot_overlay(**data_args)
+    mc_bins, mc_steps, mc_err = plot_var(**mc_args,pdg=pdg)
+    # ax_main.legend(fontsize=9)
     
     xmin, xmax = ax_main.get_xlim()
     
