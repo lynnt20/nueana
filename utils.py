@@ -41,6 +41,17 @@ def get_mcexposure_info(file_list):
         nevents += len(hdr_df)
     return ngates, pot, nevents
 
+# Defensive: ensure DataFrame axes are fully lexsorted when using MultiIndex
+# This avoids pandas PerformanceWarning about indexing past lexsort depth
+def ensure_lexsorted(frame, axis):
+    # axis: 0 -> index, 1 -> columns
+    idx = frame.index if axis == 0 else frame.columns
+    if isinstance(idx, pd.MultiIndex) and getattr(idx, "lexsort_depth", 0) < idx.nlevels:
+        # sort by all levels (returns a new frame)
+        return frame.sort_index(axis=axis)
+    return frame
+
+
 def define_signal(nudf: pd.DataFrame):
     whereFV = InFV(df=nudf.position, inzback=0, det="SBND")
     whereAV = InAV(df=nudf.position)
