@@ -8,11 +8,11 @@ from . import dataframes
 from . import masks
 
 # Import commonly used functions for convenience
-from .constants import signal_dict, signal_labels, pdg_dict, colors
-from .utils import flatten_df, get_slc, get_slices, get_evt, get_signal_evt, get_backgr_evt
+from .constants import signal_dict, signal_labels, pdg_dict
+from .utils import get_n_split, print_keys, load_dfs, get_mcexposure_info, define_signal
 from .selections import cutPreselection, cutShowerEnergy, cutContainment, cutCRUMBS
 from .corrections import shw_energy_fix
-from .plotting import plot_var, plot_var_pdg, plot_mc_data, data_plot_overlay
+from .plotting import plot_var, plot_var_pdg, data_plot_overlay, plot_mc_data
 from .masks import maskTrueVtxFv
 # from .dataframes import defineBackground, getPDGCounts, getPFP
 

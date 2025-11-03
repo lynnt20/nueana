@@ -19,12 +19,12 @@ pdg_colors.insert(4,"darkblue")
 
 # dictionary mapping particle to pdg code, used for plotting
 pdg_dict = {
-    "e-": {"pdg":11, "mass":0.000511},
-    "mu-": {"pdg":13, "mass":0.105658},
-    "gamma": {"pdg":22, "mass":0},
-    "p": {"pdg":2212, "mass":0.938272},
+    "e-":    {"pdg":11,   "mass":0.000511},
+    "mu-":   {"pdg":13,   "mass":0.105658},
+    "gamma": {"pdg":22,   "mass":0},
+    "p":     {"pdg":2212, "mass":0.938272},
     # "pi0": {"pdg":111, "mass":0.134976},
-    "pi+": {"pdg":211, "mass":0.139570},
+    "pi+":   {"pdg":211,   "mass":0.139570},
     # "n": {"pdg":2112, "mass":0.939565},
     # "other": {"pdg":0, "mass":0}
 }

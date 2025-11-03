@@ -1,134 +1,65 @@
-"""Utility functions."""
+import pandas as pd 
+from .constants import signal_dict
 
-import pandas as pd
-import numpy as np
-import statsmodels as sm
+import sys; sys.path.append("/exp/sbnd/app/users/lynnt/cafpyana")
+from makedf.util import *
 
-nu_idx_set =  ["ntuple","entry"]
-slc_idx_set = ["ntuple","entry","rec.slc__index"]
+n_max_concat=10
 
-def flatten_df(df: pd.DataFrame): 
-    """
-    Flattens a multi-index dataframe. Changes column names from "col.sub0.sub1" to "col_sub0_sub1"
-    
-    Parameters
-    ----------
-    df: pandas dataframe
-        dataframe to be flattened
-    
-    Returns
-    -------
-    flat_df: flattened pandas dataframe
-    """
-    flat_df = df.copy()
-    flat_df.reset_index(inplace=True)
-    flat_df.columns = ['_'.join(col) for col in flat_df.columns.values]
-    flat_df.columns = [col.strip('_') for col in flat_df.columns]
-    for col in flat_df.columns:
-        if ".." in col:
-            flat_df.rename(columns={col:col.replace("..","__")},inplace=True)
-    return flat_df
+# credit for first three functions to Mun! 
+def get_n_split(file):
+    this_split_df = pd.read_hdf(file, key="split")
+    this_n_split = this_split_df.n_split.iloc[0]
+    return this_n_split
 
-def get_slc(df: pd.DataFrame):
-    """
-    Returns a dataframe containing only slices (duplicate slices are not dropped, pfps are dropped).
-    "Duplicate" slices references slices corresponding to the same neutrino interaction. In other words,
-    allows "slice double counting." 
-    """
-    nodup_df = df.drop_duplicates(subset=slc_idx_set)
-    return nodup_df
-
-def get_evt(df: pd.DataFrame):
-    """
-    Returns a dataframe containing only events (duplicate slices are dropped).
-    """
-    nodup_df = df.drop_duplicates(subset=nu_idx_set)
-    return nodup_df
-
-def get_signal_evt(df: pd.DataFrame):
-    """
-    Returns a dataframe containing only signal **events** (duplicate slices are dropped).
-    Assumes the input dataframe has a "signal" column, where signal=0. 
-    """
-    # only run on flattened dataframes 
-    nodup_df = df.drop_duplicates(subset=nu_idx_set)
-    return nodup_df[nodup_df.signal == 0]
-
-def get_backgr_evt(df: pd.DataFrame):
-    """
-    Returns a dataframe containing only background events (duplicate slices are dropped).
-    
-    Parameters
-    ----------
-    df: input dataframe
-    
-    Returns
-    -------
-    backgr_df: dataframe containing only background events
-    """
-    nodup_df = df.drop_duplicates(subset=nu_idx_set)
-    slices_df = nodup_df[nodup_df["signal"]!=0]
-    return slices_df
-
-def get_signal_slc(df: pd.DataFrame):
-    """
-    Returns a dataframe containing only signal slices (Duplicate slices are not dropped, pfps are dropped)
-    "Duplicate" slices references slices corresponding to the same neutrino interaction. In other words,
-    allows "slice double counting."  
-    """
-    nodup_df = df.drop_duplicates(subset=slc_idx_set)
-    return nodup_df[nodup_df.signal==0]
-
-def get_backgr_slc(df: pd.DataFrame):
-    """
-    Returns a dataframe containing only background slices (Duplicate slices are not dropped, pfps are dropped)
-    "Duplicate" slices references slices corresponding to the same neutrino interaction. In other words,
-    allows "slice double counting." 
-    """
-    nodup_df = df.drop_duplicates(subset=slc_idx_set)
-    return nodup_df[nodup_df.signal!=0]
-
-def get_slices(df: pd.DataFrame, int_type):
-    """
-    Returns a dataframe containing slices of a certain interaction type (Duplicate slices are not dropped.)
-    "Duplicate" slices references slices corresponding to the same neutrino interaction. In other words,
-    allows "slice double counting." 
-    
-    Parameters
-    ----------
-    df: input dataframe
-    int_type: int
-        interaction type
+def print_keys(file):
+    with pd.HDFStore(file, mode='r') as store:
+        keys = store.keys()       # list of all keys in the file
+        print("Keys:", keys)
         
-    Returns
-    -------
-    slices_df: dataframe containing only slices of the specified interaction type
-    """
-    slices_df = df[df["signal"]==int_type]
-    return slices_df
+def load_dfs(file, keys2load):
+    out_df_dict = {}
+    this_n_keys = get_n_split(file) 
+    n_concat = min(n_max_concat, this_n_keys)
+    for key in keys2load:
+        dfs = []  # collect all splits for this key
+        for i in range(n_concat):
+            this_df = pd.read_hdf(file, key=f"{key}_{i}")
+            dfs.append(this_df)
+        out_df_dict[key] = pd.concat(dfs, ignore_index=False)
+    return out_df_dict
 
-def calc_err(passed: list, total: list):
-    """
-    Calculates the Binomial Error for a pass/fail selection
+def get_mcexposure_info(file_list): 
+    ngates = 0
+    pot = 0
+    nevents = 0
+    for i, file in enumerate(file_list):
+        out_df = load_dfs(file,["hdr"])
+        hdr_df = out_df["hdr"]
+        ngates += hdr_df.reset_index().drop_duplicates(subset=['run','subrun'])['ngenevt'].sum()
+        pot += hdr_df.reset_index().pot.sum()
+        nevents += len(hdr_df)
+    return ngates, pot, nevents
+
+def define_signal(nudf: pd.DataFrame):
+    whereFV = InFV(df=nudf.position, inzback=0, det="SBND")
+    whereAV = InAV(df=nudf.position)
+    whereCCnue = ((nudf.iscc==1)  # require CC interaction
+                & (abs(nudf.pdg)==12)  # require neutrino to be a nue
+                & (abs(nudf.e.pdg)==11) # require electron to be the primary (?) 
+                & (nudf.e.genE > 0.5) # require primary electron to deposit ___ MeV
+                )
+
+    if "signal" not in nudf.columns: nudf["signal"] = -1    
+    # background
+    nudf["signal"] = np.where(whereFV & (nudf.iscc==1) & (abs(nudf.pdg)==14) & (nudf.npi0>0), signal_dict["numuCCpi0"], nudf["signal"]) # numu cc FV
+    nudf["signal"] = np.where(whereFV & (nudf.iscc==0) & (nudf.npi0 > 0), signal_dict["NCpi0"], nudf["signal"]) # nc pi0 FV
+    nudf["signal"] = np.where(whereFV & (nudf.iscc==1) & (abs(nudf.pdg)==12), signal_dict["othernueCC"], nudf["signal"]) # nue cc FV
+    nudf["signal"] = np.where(whereFV & (nudf.iscc==1) & (abs(nudf.pdg)==14) & (nudf.npi0 == 0), signal_dict["othernumuCC"], nudf["signal"]) # numu cc other FV
+    nudf["signal"] = np.where(whereFV & (nudf.iscc==0) & (nudf.npi0 == 0), signal_dict["otherNC"], nudf["signal"]) # nc other FV
+    nudf["signal"] = np.where(whereFV == False & whereAV & (nudf["signal"]<0), signal_dict["nonFV"], nudf['signal']) # nonFV
+    nudf["signal"] = np.where(whereAV == False, signal_dict["dirt"], nudf["signal"]) # dirt
+    nudf["signal"] = np.where(np.isnan(nudf.E), signal_dict['cosmic'], nudf["signal"])
     
-    Parameters
-    ----------
-    passed: list of ints
-        number of events in a bin that passed the selection
-    total: list of ints
-        original number of events in that bin
-    
-    Returns
-    -------
-    err: list of lists
-        list of lower and upper errors for each bin
-    """
-    err = [[],[]]
-    eff = passed/total
-    for i in range(len(passed)):
-        val_passed = passed[i]
-        val_tot = total[i]
-        interval = sm.stats.proportion.proportion_confint(val_passed,val_tot,method='wilson')
-        err[0].append(abs(eff[i]-interval[0]))
-        err[1].append(abs(eff[i]-interval[1]))
-    return err
+    nudf["signal"] = np.where(whereFV & whereCCnue, signal_dict["nueCC"], nudf["signal"])
+    return nudf
