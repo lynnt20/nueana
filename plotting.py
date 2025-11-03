@@ -6,7 +6,6 @@ from matplotlib.patches import Patch
 import pandas as pd
 
 from .constants import signal_dict, signal_labels, pdg_dict, signal_colors, pdg_colors
-from .utils import get_slices, get_evt
 
 def plot_var(df, 
              var: tuple | str, 
@@ -208,6 +207,19 @@ def plot_var(df,
 # added for backward compatibility 
 def plot_var_pdg(**args):
     return plot_var(pdg=True,**args)
+
+def data_plot_overlay(df, var, bins,ax=None,normalize=False):
+    if ax is None:
+        ax = plt.gca()
+    hist, edges = np.histogram(df[var], bins=bins)
+    errors = np.sqrt(hist)
+    if normalize:
+        total_area = np.sum(hist)*np.diff(edges)
+        hist = hist/(total_area)
+        errors = errors/(total_area)
+    bin_centers = 0.5*(edges[1:] + edges[:-1])
+    plot = ax.errorbar(bin_centers, hist, yerr=errors, fmt='.',color='black',zorder=1e3,label='data')
+    return hist, errors, plot
 
 def plot_mc_data(mc_dfs, data_df, var, bins, 
                  scale=None, pdg=False,
