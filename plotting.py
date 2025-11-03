@@ -5,6 +5,7 @@ from matplotlib.gridspec import GridSpec
 import pandas as pd
 
 from .constants import signal_dict, signal_labels, pdg_dict, signal_colors, pdg_colors
+from .utils import ensure_lexsorted
 
 def plot_var(df, 
              var: tuple | str, 
@@ -19,7 +20,7 @@ def plot_var(df,
              mult_factor: float = 1.0,
              cut_val: list = None,
              plot_err: bool = True,
-             systs_err: np.ndarray = None, 
+             systs: np.ndarray = np.array([]), 
              pdg: bool = False,
              pdg_col: tuple | str = 'pfp_shw_truth_p_pdg',
              hatch: list = None,):
@@ -53,8 +54,9 @@ def plot_var(df,
         if specified, plots vertical lines at the specified values
     plot_err: bool
         if True, adds hatching to plot statistical error
-    systs_err: np.ndarray
+    systs: np.ndarray
         if provided, will add this error inside the stat. err 
+        The shape should be (ncounts, ndfs).
     pdg: bool
         if True, splits by true PDG instead of signal type 
     pdg_col: tuple | str
@@ -66,23 +68,20 @@ def plot_var(df,
     if (type(df) is not list): df = [df]
     if scale == None: scale = list(np.ones(len(df)))
     assert (len(scale) == len(df))
-    assert (len(systs_err) == (len(bins)-1))
-        
-    # Defensive: ensure DataFrame axes are fully lexsorted when using MultiIndex
-    # This avoids pandas PerformanceWarning about indexing past lexsort depth
-    def _ensure_lexsorted(frame, axis):
-        # axis: 0 -> index, 1 -> columns
-        idx = frame.index if axis == 0 else frame.columns
-        if isinstance(idx, pd.MultiIndex) and getattr(idx, "lexsort_depth", 0) < idx.nlevels:
-            # sort by all levels (returns a new frame)
-            return frame.sort_index(axis=axis)
-        return frame
 
+    include_systs = False
+    if len(systs)!=0:
+        assert np.shape(systs)[0] == len(bins)-1
+        assert np.shape(systs)[1] == len(df)
+        include_systs = True
+    else: 
+        systs = np.zeros((len(bins)-1,len(df)))
+        
     # Apply to each provided dataframe (both row-index and columns)
     for ii, this_df in enumerate(df):
         if isinstance(this_df, pd.DataFrame):
-            this_df = _ensure_lexsorted(this_df, axis=0)
-            this_df = _ensure_lexsorted(this_df, axis=1)
+            this_df = ensure_lexsorted(this_df, axis=0)
+            this_df = ensure_lexsorted(this_df, axis=1)
             df[ii] = this_df
     
     colors = pdg_colors if pdg else signal_colors
@@ -97,7 +96,8 @@ def plot_var(df,
     
     stats = np.zeros((len(bin_steps),len(df)))
     stats_err   = np.zeros(len(bin_steps))
-    
+    systs_err   = np.zeros(len(bin_steps))
+
     df_counter = 0
     if pdg==False: 
         for this_df, this_scale in zip(df,scale):
@@ -146,14 +146,18 @@ def plot_var(df,
     # storing the sum of each category in case we want to display it
     hist_counts = np.sum(hists,axis=1)
 
-    # statistical error is only on the input statistics, and the we rescale 
-    for i in range(len(bin_steps)): 
-        stats_err[i] = np.sqrt(np.sum(stats[i,:]))*np.array(scale)
-    
+    # statistical error is only on the input statistics, and then we rescale 
+    # if we're using multiple input mc that has different scalings, 
+    # also need to rescale the syst cov matrices
+    for i in range(len(df)):
+        stats_err += np.sqrt(stats[:,i])*scale[i]
+        systs_err += systs[:,i]*scale[i]
+
     if normalize:
         norm_factor = np.sum(hists) * np.diff(bins)
-        hists = hists / norm_factor
-        stats_err = stats_err / norm_factor
+        hists /= norm_factor
+        stats_err /= norm_factor
+        systs_err /= norm_factor    
         
     for i in range(ncategories):
         plot_label = (list(pdg_dict.keys())+['cosmic']+['other'])[i] if pdg else signal_labels[i]
@@ -177,7 +181,7 @@ def plot_var(df,
                          "lw":0.0,"facecolor":"none","hatch":"xxx",
                          "zorder":ncategories+1}
         # fill_between needs the last entry to be repeated...
-        if len(systs_err)!=0:
+        if include_systs:
             min_systs_err = steps[-1] - np.append(systs_err,systs_err[-1])
             pls_systs_err = steps[-1] + np.append(systs_err,systs_err[-1])
             min_stats_err = min_systs_err - np.append(stats_err,stats_err[-1])
@@ -194,9 +198,7 @@ def plot_var(df,
         for i in range(len(cut_val)):
             ax.axvline(cut_val[i],lw=2,color="gray",linestyle="--",zorder=6)
     
-    total_err = stats_err 
-    if len(systs_err)!=0: 
-        total_err += systs_err
+    total_err = stats_err + systs_err
 
     # * if this is a multiindex dataframe, recast `var` 
     # * (since we're done using it) to be nice as a string!
@@ -204,7 +206,7 @@ def plot_var(df,
     ax.set_xlabel(var)      if xlabel == "" else ax.set_xlabel(xlabel)
     ax.set_ylabel("Counts") if ylabel == "" else ax.set_ylabel(ylabel)
     ax.set_title (var)      if title  == "" else ax.set_title (title)
-    ax.legend()
+    ax.legend(ncol=2)
 
     return bins, steps, total_err
 
@@ -215,6 +217,11 @@ def plot_var_pdg(**args):
 def data_plot_overlay(df, var, bins,ax=None,normalize=False):
     if ax is None:
         ax = plt.gca()
+
+    if isinstance(df, pd.DataFrame):
+        df = ensure_lexsorted(df, axis=0)
+        df = ensure_lexsorted(df, axis=1)
+
     hist, edges = np.histogram(df[var], bins=bins)
     errors = np.sqrt(hist)
     if normalize:
@@ -229,6 +236,7 @@ def plot_mc_data(mc_dfs, data_df, var, bins,
                  scale=None, pdg=False,
                  xlabel="", ylabel="", title="", 
                  normalize=False,
+                 systs=np.array([]),
                  figsize = (7, 6),
                  cut_val = [],
                  ratio_min=0.0, ratio_max=2.0,
@@ -241,7 +249,7 @@ def plot_mc_data(mc_dfs, data_df, var, bins,
 
     data_hist, data_err, data_plot= data_plot_overlay(data_df, var, bins, ax=ax_main, normalize=normalize)
     mc_bins, mc_steps, mc_err = plot_var(df=mc_dfs, var=var, bins=bins, scale=scale,ax=ax_main, normalize=normalize,pdg=pdg,
-                                         xlabel=xlabel,ylabel=ylabel,title=title,hatch=hatch)
+                                         xlabel=xlabel,ylabel=ylabel,title=title,hatch=hatch,systs=systs)
     
     xmin, xmax = ax_main.get_xlim()
     
