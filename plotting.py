@@ -14,8 +14,9 @@ import matplotlib.pyplot as plt
 import matplotlib as mpl
 from matplotlib.gridspec import GridSpec
 import pandas as pd
+import warnings
 
-from .constants import signal_dict, signal_labels, pdg_dict, signal_colors, pdg_colors
+from .constants import signal_dict, signal_labels, pdg_dict, signal_colors
 from .utils import ensure_lexsorted
 
 def plot_var(df: pd.DataFrame | list[pd.DataFrame],
@@ -26,7 +27,7 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
              ylabel: str = "",
              title: str = "",
              counts: bool = False,
-             scale: list[float] | None = None,
+             scale: float | list[float] | None = None,
              normalize: bool = False,
              mult_factor: float = 1.0,
              cut_val: list[float] | None = None,
@@ -91,6 +92,7 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
         - total_err: combined stat + syst per bin (length = n_bins)
     """
     if (type(df) is not list): df = [df]
+    if (type(scale)==float or type(scale)==np.float64): scale = [scale]
     if scale == None: scale = list(np.ones(len(df)))
     assert (len(scale) == len(df))
 
@@ -109,11 +111,11 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
             this_df = ensure_lexsorted(this_df, axis=1)
             df[ii] = this_df
     
-    colors = pdg_colors if pdg else signal_colors
+    colors = signal_colors
     if ax is None: ax = plt.gca()
     ncategories = len(pdg_dict)+2 if pdg else len(signal_dict)
     if hatch == None: hatch = [""]*ncategories
-    alpha = 0.4 
+    alpha = 0.25 if pdg else 0.4
     
     bin_steps   = bins[1:]    
     hists   = np.zeros((ncategories,len(bin_steps))) # this is for storing the histograms
@@ -194,8 +196,8 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
         steps[i] = np.insert(hists[i],obj=0,values=hists[i][0]) + bottom; 
 
         ax.fill_between(bins, bottom, steps[i], step="pre", 
-                         facecolor=mpl.colors.to_rgba(colors[i],alpha),
-                         edgecolor=mpl.colors.to_rgba(colors[i],1.0),
+                         facecolor=mpl.colors.to_rgba(colors[i],alpha) if plot_label!='cosmic' else mpl.colors.to_rgba(colors[-1],alpha),
+                         edgecolor=mpl.colors.to_rgba(colors[i],1.0) if plot_label!='cosmic' else mpl.colors.to_rgba(colors[-1],1.0),
                          lw=1.5, 
                          hatch=hatch[i],zorder=(ncategories-i),label=plot_label)
     if plot_err: 
@@ -235,7 +237,6 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
 
     return bins, steps, total_err
 
-# added for backward compatibility 
 def plot_var_pdg(**args):
     """Backward-compatible wrapper for plotting by PDG.
 
@@ -301,8 +302,9 @@ def plot_mc_data(mc_dfs: pd.DataFrame | list[pd.DataFrame],
                  data_df: pd.DataFrame,
                  var: str | tuple,
                  bins: list[float] | np.ndarray,
-                 scale: list[float] | None = None,
+                 scale: float | list[float] | None = None,
                  pdg: bool = False,
+                 pdg_col: tuple | str = 'pfp_shw_truth_p_pdg',
                  xlabel: str = "",
                  ylabel: str = "",
                  title:  str = "",
@@ -326,10 +328,13 @@ def plot_mc_data(mc_dfs: pd.DataFrame | list[pd.DataFrame],
         Column (or multi-index tuple) to histogram.
     bins : array-like
         Bin edges for the histograms.
-    scale : list[float], optional
+    scale : float or list[float], optional
         Scaling factors applied to each MC dataframe. If None, all scales are 1.0.
     pdg : bool, default False
         If True, instruct `plot_var` to split MC by PDG instead of signal type.
+    pdg_col : tuple | str, default 'pfp_shw_truth_p_pdg'
+        Column (or multi-index tuple) containing the PDG code per particle (used when ``pdg``
+        is True).
     xlabel, ylabel, title : str, optional
         Labels and title for the main axis. If blank, sensible defaults are used.
     normalize : bool, default False
@@ -363,22 +368,26 @@ def plot_mc_data(mc_dfs: pd.DataFrame | list[pd.DataFrame],
                      xlabel=xlabel, ylabel=ylabel,title=title)
 
     data_hist, data_err, data_plot = data_plot_overlay(**data_args)
-    mc_bins, mc_steps, mc_err = plot_var(**mc_args,pdg=pdg)
-    # ax_main.legend(fontsize=9)
+    mc_bins, mc_steps, mc_err = plot_var(**mc_args,pdg=pdg,pdg_col=pdg_col)
     
     xmin, xmax = ax_main.get_xlim()
     
     # plot the ratio
     mc_tot = mc_steps[-1][1:]  # last step contains the total MC counts
-    data_mc_ratio = data_hist / mc_tot
-    data_mc_ratio_err = data_mc_ratio * np.sqrt((data_err / data_hist)**2 + (mc_err / mc_tot)**2)
-    mc_contribution = mc_err/mc_tot
+
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore",message="invalid value encountered in divide")
+        ratio = data_hist / mc_tot
+        ratio_err = ratio * np.sqrt((data_err / data_hist)**2 + (mc_err / mc_tot)**2)
+        mc_contribution = mc_err/mc_tot
     bin_centers = 0.5 * (mc_bins[1:] + mc_bins[:-1])
-    ax_sub.errorbar(bin_centers, data_mc_ratio, yerr=data_mc_ratio_err, fmt='s', markersize=3,color='black', zorder=1e3, label='data/MC ratio')
-    for i in range(len(mc_contribution)):
-        ax_sub.fill_between(mc_bins[i:i+2],1 - mc_contribution[i], 1 + mc_contribution[i], step="post",
-                            color=mpl.colors.to_rgba("gray", alpha=0.4),
-                            lw=0.0, label='MC stat. err.' if i==0 else "")
+
+    ax_sub.errorbar(bin_centers, ratio, yerr=ratio_err, fmt='s', markersize=3,color='black', zorder=1e3, label='data/MC ratio')
+    # fill_between needs last entry to be reepated 
+    ps_err = 1 + np.append(mc_contribution,mc_contribution[-1])
+    ms_err = 1 - np.append(mc_contribution,mc_contribution[-1])
+    ax_sub.fill_between(mc_bins,ms_err, ps_err, step="post", color=mpl.colors.to_rgba("gray", alpha=0.4), lw=0.0, label='MC err.')
+    
     ax_sub.axhline(1, color='red', linestyle='--', linewidth=1, zorder=0,label="y=1.0")
     ax_sub.set_xlim(xmin, xmax)
     ax_sub.set_ylim(ratio_min, ratio_max)

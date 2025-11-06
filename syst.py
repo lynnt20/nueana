@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+import warnings
 from .utils import ensure_lexsorted
 
 def get_hist(weight,data,bins): return np.histogram(data,bins=bins,weights=weight)[0]
@@ -12,19 +13,21 @@ def calc_matrices(var_arr,cv):
     cov_frac = np.zeros((nbins,nbins))
     corr = np.zeros((nbins,nbins))
 
-    for ivar in range(nuniv):
-        var = var_arr[:,ivar]
-        for i in range(nbins):
-            for j in range(nbins):   
-                cov[i,j]      += (var[i] - cv[i])*(var[j] - cv[j])
-                cov_frac[i,j] += (var[i] - cv[i])/(cv[i]) * (var[j] - cv[j])/(cv[j])
-    
-    cov /= nuniv
-    cov_frac /= nuniv
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore",message="invalid value encountered in scalar divide")
+        for ivar in range(nuniv):
+            var = var_arr[:,ivar]
+            for i in range(nbins):
+                for j in range(nbins):   
+                    cov[i,j]      += (var[i] - cv[i])*(var[j] - cv[j])
+                    cov_frac[i,j] += (var[i] - cv[i])/(cv[i]) * (var[j] - cv[j])/(cv[j])
+        
+        cov /= nuniv
+        cov_frac /= nuniv
 
-    for i in range(nbins):
-        for j in range(nbins):
-            corr[i,j] = cov[i,j] / (np.sqrt ( cov[i,i] )* np.sqrt( cov[j,j] ))
+        for i in range(nbins):
+            for j in range(nbins):
+                corr[i,j] = cov[i,j] / (np.sqrt ( cov[i,i] )* np.sqrt( cov[j,j] ))
     return cov, cov_frac, corr
 
 def get_syst(indf: pd.DataFrame,

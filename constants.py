@@ -14,8 +14,6 @@ signal_labels = [r"CC $\nu_e$",
 
 # default colors used for plotting 
 signal_colors = ["C0", "C1", "C2", "C3", "darkslateblue", "C4", "C5", "C6","C7"]
-pdg_colors = sns.color_palette("deep")
-pdg_colors.insert(4,"darkblue")
 
 # dictionary mapping particle to pdg code, used for plotting
 pdg_dict = {
