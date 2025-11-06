@@ -52,25 +52,34 @@ def ensure_lexsorted(frame, axis):
     return frame
 
 
-def define_signal(nudf: pd.DataFrame):
-    whereFV = InFV(df=nudf.position, inzback=0, det="SBND")
-    whereAV = InAV(df=nudf.position)
-    whereCCnue = ((nudf.iscc==1)  # require CC interaction
-                & (abs(nudf.pdg)==12)  # require neutrino to be a nue
-                & (abs(nudf.e.pdg)==11) # require electron to be the primary (?) 
-                & (nudf.e.genE > 0.5) # require primary electron to deposit ___ MeV
+def define_signal(indf: pd.DataFrame,prefix=None):
+    # sort by row 
+    indf = ensure_lexsorted(indf,0)
+    # sort by column make copy to preserve column ordering of original
+    nudf = ensure_lexsorted(indf.copy(),1)
+
+    if prefix==None: mcdf = nudf
+    else: mcdf = nudf[prefix]
+
+    whereFV = InFV(df=mcdf.position, inzback=0, det="SBND")
+    whereAV = InAV(df=mcdf.position)
+    whereCCnue = ((mcdf.iscc==1)  # require CC interaction
+                & (abs(mcdf.pdg)==12)  # require neutrino to be a nue
+                & (abs(mcdf.e.pdg)==11) # require electron to be the primary (?) 
+                & (mcdf.e.genE > 0.5) # require primary electron to deposit ___ MeV
                 )
 
     if "signal" not in nudf.columns: nudf["signal"] = -1    
     # background
-    nudf["signal"] = np.where(whereFV & (nudf.iscc==1) & (abs(nudf.pdg)==14) & (nudf.npi0>0), signal_dict["numuCCpi0"], nudf["signal"]) # numu cc FV
-    nudf["signal"] = np.where(whereFV & (nudf.iscc==0) & (nudf.npi0 > 0), signal_dict["NCpi0"], nudf["signal"]) # nc pi0 FV
-    nudf["signal"] = np.where(whereFV & (nudf.iscc==1) & (abs(nudf.pdg)==12), signal_dict["othernueCC"], nudf["signal"]) # nue cc FV
-    nudf["signal"] = np.where(whereFV & (nudf.iscc==1) & (abs(nudf.pdg)==14) & (nudf.npi0 == 0), signal_dict["othernumuCC"], nudf["signal"]) # numu cc other FV
-    nudf["signal"] = np.where(whereFV & (nudf.iscc==0) & (nudf.npi0 == 0), signal_dict["otherNC"], nudf["signal"]) # nc other FV
+    nudf["signal"] = np.where(whereFV & (mcdf.iscc==1) & (abs(mcdf.pdg)==14) & (mcdf.npi0>0), signal_dict["numuCCpi0"], nudf["signal"]) # numu cc FV
+    nudf["signal"] = np.where(whereFV & (mcdf.iscc==0) & (mcdf.npi0 > 0), signal_dict["NCpi0"], nudf["signal"]) # nc pi0 FV
+    nudf["signal"] = np.where(whereFV & (mcdf.iscc==1) & (abs(mcdf.pdg)==12), signal_dict["othernueCC"], nudf["signal"]) # nue cc FV
+    nudf["signal"] = np.where(whereFV & (mcdf.iscc==1) & (abs(mcdf.pdg)==14) & (mcdf.npi0 == 0), signal_dict["othernumuCC"], nudf["signal"]) # numu cc other FV
+    nudf["signal"] = np.where(whereFV & (mcdf.iscc==0) & (mcdf.npi0 == 0), signal_dict["otherNC"], nudf["signal"]) # nc other FV
     nudf["signal"] = np.where(whereFV == False & whereAV & (nudf["signal"]<0), signal_dict["nonFV"], nudf['signal']) # nonFV
     nudf["signal"] = np.where(whereAV == False, signal_dict["dirt"], nudf["signal"]) # dirt
-    nudf["signal"] = np.where(np.isnan(nudf.E), signal_dict['cosmic'], nudf["signal"])
+    nudf["signal"] = np.where(np.isnan(mcdf.E), signal_dict['cosmic'], nudf["signal"])
     
     nudf["signal"] = np.where(whereFV & whereCCnue, signal_dict["nueCC"], nudf["signal"])
-    return nudf
+    indf["signal"] = nudf["signal"]
+    return indf
