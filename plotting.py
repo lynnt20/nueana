@@ -39,8 +39,8 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
     """Plot a variable as stacked histograms for signal categories or PDG types.
 
     This function supports two modes controlled by ``pdg``:
-    - pdg=False (default): stack by interaction type using ``signal_dict`` / ``signal_colors``.
-    - pdg=True: stack by particle PDG using ``pdg_dict`` / ``pdg_colors``; adds 'cosmic' and
+    - pdg=False (default): stack by interaction type using ``signal_dict``.
+    - pdg=True: stack by particle PDG using ``pdg_dict``; adds 'cosmic' and
       'other' as the last two categories.
 
     Parameters
@@ -194,10 +194,9 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
         bottom=steps[i-1] if i>0 else 0
         # steps needs the first entry to be repeated!
         steps[i] = np.insert(hists[i],obj=0,values=hists[i][0]) + bottom; 
-
         ax.fill_between(bins, bottom, steps[i], step="pre", 
-                         facecolor=mpl.colors.to_rgba(colors[i],alpha) if plot_label!='cosmic' else mpl.colors.to_rgba(colors[-1],alpha),
-                         edgecolor=mpl.colors.to_rgba(colors[i],1.0) if plot_label!='cosmic' else mpl.colors.to_rgba(colors[-1],1.0),
+                         facecolor=mpl.colors.to_rgba(colors[i],alpha) if plot_label.find('cosmic') else mpl.colors.to_rgba(colors[-1],alpha),
+                         edgecolor=mpl.colors.to_rgba(colors[i],1.0)   if plot_label.find('cosmic') else mpl.colors.to_rgba(colors[-1],1.0),
                          lw=1.5, 
                          hatch=hatch[i],zorder=(ncategories-i),label=plot_label)
     if plot_err: 
@@ -290,12 +289,14 @@ def data_plot_overlay(df: pd.DataFrame,
 
     hist, edges = np.histogram(df[var], bins=bins)
     errors = np.sqrt(hist)
+    label = "data" 
+    label += f" ({np.sum(hist,dtype=int):,})" if np.sum(hist) < 1e6 else f"({np.sum(hist):.2e}"
     if normalize:
         total_area = np.sum(hist)*np.diff(edges)
         hist = hist/(total_area)
         errors = errors/(total_area)
     bin_centers = 0.5*(edges[1:] + edges[:-1])
-    plot = ax.errorbar(bin_centers, hist, yerr=errors, fmt='.',color='black',zorder=1e3,label='data')
+    plot = ax.errorbar(bin_centers, hist, yerr=errors, fmt='.',color='black',zorder=1e3,label=label)
     return hist, errors, plot
 
 def plot_mc_data(mc_dfs: pd.DataFrame | list[pd.DataFrame],
@@ -308,6 +309,7 @@ def plot_mc_data(mc_dfs: pd.DataFrame | list[pd.DataFrame],
                  xlabel: str = "",
                  ylabel: str = "",
                  title:  str = "",
+                 counts: bool = False, 
                  normalize: bool = False,
                  systs: np.ndarray = np.array([]),
                  figsize: tuple[int, int] = (7, 6),
@@ -337,6 +339,8 @@ def plot_mc_data(mc_dfs: pd.DataFrame | list[pd.DataFrame],
         is True).
     xlabel, ylabel, title : str, optional
         Labels and title for the main axis. If blank, sensible defaults are used.
+    counts : bool, default False
+        If True, append event counts to legend labels.
     normalize : bool, default False
         If True, normalize both MC and data histograms to unit area.
     systs : numpy.ndarray, optional
@@ -364,7 +368,7 @@ def plot_mc_data(mc_dfs: pd.DataFrame | list[pd.DataFrame],
 
     data_args = dict(df=data_df, var=var, bins=bins, ax=ax_main, normalize=normalize)
     mc_args   = dict(df=mc_dfs,  var=var, bins=bins, ax=ax_main, normalize=normalize,
-                     scale=scale, systs=systs, hatch=hatch,
+                     scale=scale, systs=systs, hatch=hatch, counts=counts,
                      xlabel=xlabel, ylabel=ylabel,title=title)
 
     data_hist, data_err, data_plot = data_plot_overlay(**data_args)
@@ -377,15 +381,19 @@ def plot_mc_data(mc_dfs: pd.DataFrame | list[pd.DataFrame],
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore",message="invalid value encountered in divide")
+        # ratio is (data bin content) / (mc bin content)
         ratio = data_hist / mc_tot
-        ratio_err = ratio * np.sqrt((data_err / data_hist)**2 + (mc_err / mc_tot)**2)
+        # error in ratio is just (data error) / (mc bin content)
+        ratio_err = data_err / mc_tot
+        # error in shading should just be (mc error) / (mc bin content)
         mc_contribution = mc_err/mc_tot
+        # shading is around unity    
+        ps_err = 1 + np.append(mc_contribution,mc_contribution[-1])
+        ms_err = 1 - np.append(mc_contribution,mc_contribution[-1])
     bin_centers = 0.5 * (mc_bins[1:] + mc_bins[:-1])
 
     ax_sub.errorbar(bin_centers, ratio, yerr=ratio_err, fmt='s', markersize=3,color='black', zorder=1e3, label='data/MC ratio')
-    # fill_between needs last entry to be reepated 
-    ps_err = 1 + np.append(mc_contribution,mc_contribution[-1])
-    ms_err = 1 - np.append(mc_contribution,mc_contribution[-1])
+    # fill_between needs last entry to be repeated 
     ax_sub.fill_between(mc_bins,ms_err, ps_err, step="post", color=mpl.colors.to_rgba("gray", alpha=0.4), lw=0.0, label='MC err.')
     
     ax_sub.axhline(1, color='red', linestyle='--', linewidth=1, zorder=0,label="y=1.0")
