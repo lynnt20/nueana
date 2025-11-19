@@ -17,12 +17,12 @@ signal_colors = ["C0", "C1", "C2", "C3", "darkslateblue", "C4", "C5", "C6","C7"]
 
 # dictionary mapping particle to pdg code, used for plotting
 pdg_dict = {
-    "e-":    {"pdg":11,   "mass":0.000511},
-    "mu-":   {"pdg":13,   "mass":0.105658},
-    "gamma": {"pdg":22,   "mass":0},
-    "p":     {"pdg":2212, "mass":0.938272},
+    r"$e$":    {"pdg":11,   "mass":0.000511},
+    r"$\mu$":   {"pdg":13,   "mass":0.105658},
+    r"$\gamma$": {"pdg":22,   "mass":0},
+    r"$p$":     {"pdg":2212, "mass":0.938272},
     # "pi0": {"pdg":111, "mass":0.134976},
-    "pi+":   {"pdg":211,   "mass":0.139570},
+    r"$\pi^{+/-}$":   {"pdg":211,   "mass":0.139570},
     # "n": {"pdg":2112, "mass":0.939565},
     # "other": {"pdg":0, "mass":0}
 }
