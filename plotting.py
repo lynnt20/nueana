@@ -18,6 +18,7 @@ import warnings
 
 from .constants import signal_dict, signal_labels, pdg_dict, signal_colors
 from .utils import ensure_lexsorted
+from .syst import *
 
 def plot_var(df: pd.DataFrame | list[pd.DataFrame],
              var: tuple | str,
@@ -32,7 +33,7 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
              mult_factor: float = 1.0,
              cut_val: list[float] | None = None,
              plot_err: bool = True,
-             systs: np.ndarray = np.array([]),
+             systs: bool = False,
              pdg: bool = False,
              pdg_col: tuple | str = 'pfp_shw_truth_p_pdg',
              hatch: list[str] | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -73,9 +74,8 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
         List of x-values at which to draw vertical cut lines.
     plot_err : bool, default True
         If True, draw MC statistical (and optional systematic) error bands.
-    systs : numpy.ndarray, shape=(n_bins, n_dfs), optional
-        Optional per-bin systematic contributions for each input dataframe. If provided its
-        shape must be (n_bins, n_dfs). Default is an array of zeros.
+    systs : bool, default False
+        if True, calculates and plots systematic uncertainties. 
     pdg : bool, default False
         When True, split histograms by PDG (uses ``pdg_col``). Otherwise split by signal type.
     pdg_col : tuple | str, default 'pfp_shw_truth_p_pdg'
@@ -96,14 +96,6 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
     if scale == None: scale = list(np.ones(len(df)))
     assert (len(scale) == len(df))
 
-    include_systs = False
-    if len(systs)!=0:
-        assert np.shape(systs)[0] == len(bins)-1
-        assert np.shape(systs)[1] == len(df)
-        include_systs = True
-    else: 
-        systs = np.zeros((len(bins)-1,len(df)))
-        
     # Apply to each provided dataframe (both row-index and columns)
     for ii, this_df in enumerate(df):
         if isinstance(this_df, pd.DataFrame):
@@ -173,12 +165,33 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
     # storing the sum of each category in case we want to display it
     hist_counts = np.sum(hists,axis=1)
 
+    # check if systematic cols are inside the df
+    bool found_systs = False
+    for col in df[0].columns:
+        if "univ_" in list(col):
+            found_systs = True
+            break
+    if (systs==True) & (found_systs): 
+        # ! TODO now hardcoded for the first entry
+        this_mc = df[0]
+        this_sig = this_mc[this_mc.signal < signal_dict['cosmic']]
+        syst_dict = get_syst(indf=this_sig,var=var,bins=bins)
+        total_cov = np.zeros((len(bins)-1,len(bins)-1))
+        for key in syst_dict.keys():
+            total_cov += syst_dict[key][1]
+        systs_arr = np.reshape(np.sqrt(np.diag(total_cov)),(-1,1))
+    else:
+        if (systs==True) & (found_systs=False):
+            print("can't find universes in the input df, ignoring systematic error bars")
+            systs=False
+        systs_arr = np.reshape(np.zeros(len(bins)-1),(-1,1))
+        
     # statistical error is only on the input statistics, and then we rescale 
     # if we're using multiple input mc that has different scalings, 
     # also need to rescale the syst cov matrices
     for i in range(len(df)):
         stats_err += np.sqrt(stats[:,i])*scale[i]
-        systs_err += systs[:,i]*scale[i]
+        systs_err += systs_arr[:,i]*scale[i]
 
     if normalize:
         norm_factor = np.sum(hists) * np.diff(bins)
@@ -206,12 +219,12 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
         systs_options = {"step":"pre", "color":mpl.colors.to_rgba("gray", alpha=0.8),
                          "lw":0.0,"facecolor":"none","hatch":"xxx",
                          "zorder":ncategories+1}
-        # fill_between needs the last entry to be repeated...
-        if include_systs:
-            min_systs_err = steps[-1] - np.append(systs_err,systs_err[-1])
-            pls_systs_err = steps[-1] + np.append(systs_err,systs_err[-1])
-            min_stats_err = min_systs_err - np.append(stats_err,stats_err[-1])
-            pls_stats_err = pls_systs_err + np.append(stats_err,stats_err[-1])
+        # fill_between needs the *first* entry to be repeated...
+        if systs:
+            min_systs_err = steps[-1]     - np.append(systs_err[0],systs_err)
+            pls_systs_err = steps[-1]     + np.append(systs_err[0],systs_err)
+            min_stats_err = min_systs_err - np.append(stats_err[0],stats_err)
+            pls_stats_err = pls_systs_err + np.append(stats_err[0],stats_err)
             ax.fill_between(bins, min_systs_err, pls_systs_err, **systs_options,label="MC syst.")
             ax.fill_between(bins, min_systs_err, min_stats_err, **stats_options,label="MC stat.")
             ax.fill_between(bins, pls_systs_err, pls_stats_err, **stats_options)
@@ -372,12 +385,13 @@ def plot_mc_data(mc_dfs: pd.DataFrame | list[pd.DataFrame],
                      xlabel=xlabel, ylabel=ylabel,title=title)
 
     data_hist, data_err, data_plot = data_plot_overlay(**data_args)
-    mc_bins, mc_steps, mc_err = plot_var(**mc_args,pdg=pdg,pdg_col=pdg_col)
+    mc_bins, mc_steps, mc_err      = plot_var(**mc_args,pdg=pdg,pdg_col=pdg_col)
     
     xmin, xmax = ax_main.get_xlim()
     
     # plot the ratio
     mc_tot = mc_steps[-1][1:]  # last step contains the total MC counts
+    fig.canvas.draw()
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore",message="invalid value encountered in divide")
@@ -388,13 +402,25 @@ def plot_mc_data(mc_dfs: pd.DataFrame | list[pd.DataFrame],
         # error in shading should just be (mc error) / (mc bin content)
         mc_contribution = mc_err/mc_tot
         # shading is around unity    
-        ps_err = 1 + np.append(mc_contribution,mc_contribution[-1])
-        ms_err = 1 - np.append(mc_contribution,mc_contribution[-1])
+        ps_err = 1 + np.append(mc_contribution[0],mc_contribution)
+        ms_err = 1 - np.append(mc_contribution[0],mc_contribution)
+        
+        # sum_ratio = np.sum(data_hist)/np.sum(mc_tot)
+        # sum_syst_err = np.sqrt(np.sum(mc_err**2)) / np.sum(mc_tot)
+        # sum_stat_err = np.sqrt(np.sum(data_err**2)) / np.sum(mc_tot)
+        
+        # chisq = np.sum((data_hist - mc_tot)**2/mc_tot)
+        
     bin_centers = 0.5 * (mc_bins[1:] + mc_bins[:-1])
-
+    nbins = len(bins)-1
+    
+    # ax_main.annotate(r"$\chi^2/$dof"+f"={chisq:.1f}/{int(nbins)}",xycoords='axes fraction',xy=(0.025,0.925))
+    # ax_main.annotate(r"$\Sigma$data/$\Sigma$MC"+f"={sum_ratio:.2f}"+r"$\pm$"+f"{sum_syst_err:.2f}(sys.)"+r"$\pm$"+f"{sum_stat_err:.2f}(stat.)" ,
+    #                  xycoords='axes fraction',xy=(0.025,0.85))
+    
     ax_sub.errorbar(bin_centers, ratio, yerr=ratio_err, fmt='s', markersize=3,color='black', zorder=1e3, label='data/MC ratio')
     # fill_between needs last entry to be repeated 
-    ax_sub.fill_between(mc_bins,ms_err, ps_err, step="post", color=mpl.colors.to_rgba("gray", alpha=0.4), lw=0.0, label='MC err.')
+    ax_sub.fill_between(mc_bins,ms_err, ps_err, step="pre", color=mpl.colors.to_rgba("gray", alpha=0.4), lw=0.0, label='MC err.')
     
     ax_sub.axhline(1, color='red', linestyle='--', linewidth=1, zorder=0,label="y=1.0")
     ax_sub.set_xlim(xmin, xmax)
