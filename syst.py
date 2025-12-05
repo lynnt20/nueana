@@ -44,13 +44,19 @@ def get_syst(indf: pd.DataFrame,
 
     unisim_col = []
     multisig_col  = [] 
-    multisim_col = ["GENIE","Flux"]
+    genie_col = []
+    flux_col = []
     for col in df.columns:
         col_list = list(col) # since col is tuple 
         if 'morph' in col:
             unisim_col.append(col_list[0])
         elif 'ps1' in col:
             multisig_col.append(col_list[0])
+        elif "GENIE" in col:
+            genie_col.append(col)
+        elif "Flux" in col:
+            flux_col.append(col)
+    multisim_col = [genie_col, flux_col]
             
     syst_dict = {}
     nbins = len(bins) 
@@ -64,11 +70,12 @@ def get_syst(indf: pd.DataFrame,
         weights = np.stack([df[col].ps1.to_numpy(),df[col].ms1.to_numpy()]).T
         hists = np.apply_along_axis(get_hist, 0, weights, cv_input, bins)
         syst_dict[col] = [hists]
-    for col in multisim_col:
-        # * for multisim, get all universes automatically     
-        weights = df[col].to_numpy()
+    for i, cols in enumerate(multisim_col):
+        # * for multisim, get all universes automatically
+        weights = df[cols].to_numpy()
         hists = np.apply_along_axis(get_hist, 0, weights, cv_input, bins)
-        syst_dict[col] = [hists]
+        if i==0: syst_dict['GENIE'] = [hists]
+        if i==1: syst_dict["Flux"] = [hists]
         
     for key in syst_dict.keys():
         hists = syst_dict[key][0]
