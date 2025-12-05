@@ -166,7 +166,7 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
     hist_counts = np.sum(hists,axis=1)
 
     # check if systematic cols are inside the df
-    bool found_systs = False
+    found_systs = False
     for col in df[0].columns:
         if "univ_" in list(col):
             found_systs = True
@@ -181,7 +181,7 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
             total_cov += syst_dict[key][1]
         systs_arr = np.reshape(np.sqrt(np.diag(total_cov)),(-1,1))
     else:
-        if (systs==True) & (found_systs=False):
+        if (systs==True) & (found_systs==False):
             print("can't find universes in the input df, ignoring systematic error bars")
             systs=False
         systs_arr = np.reshape(np.zeros(len(bins)-1),(-1,1))
