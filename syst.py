@@ -49,9 +49,9 @@ def get_syst(indf: pd.DataFrame,
     for col in df.columns:
         col_list = list(col) # since col is tuple 
         if 'morph' in col:
-            unisim_col.append(col_list[0])
+            unisim_col.append(col_list)
         elif 'ps1' in col:
-            multisig_col.append(col_list[0])
+            multisig_col.append(col_list)
         elif "GENIE" in col:
             genie_col.append(col)
         elif "Flux" in col:
@@ -62,7 +62,7 @@ def get_syst(indf: pd.DataFrame,
     nbins = len(bins) 
     for col in unisim_col: 
         # * for unisim, get straight from `morph`
-        weights = df[col].morph.to_numpy()
+        weights = df[col].to_numpy()
         hists = np.apply_along_axis(get_hist, 0, weights, cv_input, bins)
         syst_dict[col] = [np.reshape(hists,(nbins-1,-1))]
     for col in multisig_col:

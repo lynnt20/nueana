@@ -168,7 +168,7 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
     # check if systematic cols are inside the df
     found_systs = False
     for col in df[0].columns:
-        if "univ_" in list(col):
+        if "univ_" in "_".join(list(col)):
             found_systs = True
             break
     if (systs==True) & (found_systs): 
@@ -185,6 +185,7 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
             print("can't find universes in the input df, ignoring systematic error bars")
             systs=False
         systs_arr = np.reshape(np.zeros(len(bins)-1),(-1,1))
+        syst_dict = {}
         
     # statistical error is only on the input statistics, and then we rescale 
     # if we're using multiple input mc that has different scalings, 
@@ -247,7 +248,7 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
     ax.set_title (var)      if title  == "" else ax.set_title (title)
     ax.legend(ncol=2)
 
-    return bins, steps, total_err
+    return bins, steps, total_err, syst_dict
 
 def plot_var_pdg(**args):
     """Backward-compatible wrapper for plotting by PDG.
@@ -385,7 +386,7 @@ def plot_mc_data(mc_dfs: pd.DataFrame | list[pd.DataFrame],
                      xlabel=xlabel, ylabel=ylabel,title=title)
 
     data_hist, data_err, data_plot = data_plot_overlay(**data_args)
-    mc_bins, mc_steps, mc_err      = plot_var(**mc_args,pdg=pdg,pdg_col=pdg_col)
+    mc_bins, mc_steps, mc_err, mc_dict = plot_var(**mc_args,pdg=pdg,pdg_col=pdg_col)
     
     xmin, xmax = ax_main.get_xlim()
     
@@ -437,4 +438,4 @@ def plot_mc_data(mc_dfs: pd.DataFrame | list[pd.DataFrame],
     if savefig!="":
         plt.savefig(savefig,bbox_inches='tight')
     
-    return fig, ax_main, ax_sub
+    return fig, ax_main, ax_sub, mc_dict
