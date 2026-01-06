@@ -6,6 +6,35 @@ from .utils import ensure_lexsorted
 def get_hist(weight,data,bins): return np.histogram(data,bins=bins,weights=weight)[0]
 
 def calc_matrices(var_arr,cv):
+    def calc_matrices(var_arr, cv):
+        """
+        Calculate covariance, fractional covariance, and correlation matrices.
+        This function computes statistical matrices from variations around a central value,
+        commonly used in systematic uncertainty analysis.
+        Parameters
+        ----------
+        var_arr : np.ndarray
+            2D array of shape (nbins, nuniv) containing variations for each bin and universe.
+            nbins is the number of bins, nuniv is the number of universes/variations.
+        cv : np.ndarray
+            1D array of shape (nbins,) containing central values for each bin.
+        Returns
+        -------
+        cov : np.ndarray
+            2D array of shape (nbins, nbins) containing the covariance matrix.
+        cov_frac : np.ndarray
+            2D array of shape (nbins, nbins) containing the fractional covariance matrix
+            (normalized by central values).
+        corr : np.ndarray
+            2D array of shape (nbins, nbins) containing the correlation matrix,
+            derived from the covariance matrix.
+        Notes
+        -----
+        - Warnings about invalid values in division are suppressed (e.g., division by zero).
+        - The matrices returned are normalized to n_universes. 
+        - The correlation matrix is computed as: corr[i,j] = cov[i,j] / sqrt(cov[i,i] * cov[j,j])
+        """
+    
     nbins = len(cv)
     nuniv = len(var_arr[1])
 
@@ -44,38 +73,49 @@ def get_syst(indf: pd.DataFrame,
 
     unisim_col = []
     multisig_col  = [] 
-    genie_col = []
-    flux_col = []
+    multisim_col = []
+    univ_level = -1
+
+    # find the level that the multisim universes begin 
     for col in df.columns:
-        col_list = list(col) # since col is tuple 
+        if "univ" in "".join(list(col)):
+            for i, x in enumerate(col): 
+                if x.startswith('univ'): 
+                    univ_level = i 
+                    break
+            break
+    
+    for col in df.columns:
         if 'morph' in col:
-            unisim_col.append(col_list)
+            unisim_col.append(col)
         elif 'ps1' in col:
-            multisig_col.append(col_list)
-        elif "GENIE" in col:
-            genie_col.append(col)
-        elif "Flux" in col:
-            flux_col.append(col)
-    multisim_col = [genie_col, flux_col]
+            multisig_col.append(col)
+        elif "univ" in "".join(list(col)):
+            if col[:univ_level] not in multisim_col: 
+                multisim_col.append(col[:univ_level])
             
     syst_dict = {}
     nbins = len(bins) 
+
+    # ! TODO: optimize by stacking weights and doing one hist call per syst type
     for col in unisim_col: 
         # * for unisim, get straight from `morph`
         weights = df[col].to_numpy()
         hists = np.apply_along_axis(get_hist, 0, weights, cv_input, bins)
-        syst_dict[col] = [np.reshape(hists,(nbins-1,-1))]
+        # rename key to only include the relevant part of the column 
+        syst_dict[col[2]] = [np.reshape(hists,(nbins-1,-1))]
     for col in multisig_col:
-        # * for multisigma, get two universes, ps1 and ms1   
-        weights = np.stack([df[col].ps1.to_numpy(),df[col].ms1.to_numpy()]).T
+        # * for multisigma, get two universes, ps1 and ms1
+        ps1_col = col 
+        ms1_col = tuple([x if x!='ps1' else 'ms1' for x in list(col)])
+        weights = np.stack([df[col].to_numpy(),df[col].to_numpy()]).T
         hists = np.apply_along_axis(get_hist, 0, weights, cv_input, bins)
-        syst_dict[col] = [hists]
-    for i, cols in enumerate(multisim_col):
+        syst_dict[col[2]] = [hists]
+    for col in multisim_col:
         # * for multisim, get all universes automatically
-        weights = df[cols].to_numpy()
+        weights = df[col].to_numpy()
         hists = np.apply_along_axis(get_hist, 0, weights, cv_input, bins)
-        if i==0: syst_dict['GENIE'] = [hists]
-        if i==1: syst_dict["Flux"] = [hists]
+        syst_dict[col[2]] = [hists]
         
     for key in syst_dict.keys():
         hists = syst_dict[key][0]
