@@ -97,24 +97,48 @@ def get_syst(indf: pd.DataFrame,
     syst_dict = {}
     nbins = len(bins) 
 
-    # ! TODO: optimize by stacking weights and doing one hist call per syst type
+    # Optimized: stack weights and do histogram computation per syst type
+    # For unisim: process all unisim columns together
     for col in unisim_col: 
-        # * for unisim, get straight from `morph`
+        # for unisim, get straight from `morph`
         weights = df[col].to_numpy()
-        hists = np.apply_along_axis(get_hist, 0, weights, cv_input, bins)
-        # rename key to only include the relevant part of the column 
-        syst_dict[col[2]] = [np.reshape(hists,(nbins-1,-1))]
+        n_universes = weights.shape[1] if weights.ndim > 1 else 1
+        hists = np.zeros((nbins-1, n_universes))
+        
+        # Compute histograms for all universes in this column
+        if weights.ndim > 1:
+            for i in range(n_universes):
+                hists[:, i] = get_hist(weights[:, i], cv_input, bins)
+        else:
+            hists[:, 0] = get_hist(weights, cv_input, bins)
+        
+        syst_dict[col[2]] = [hists]
+    
+    # For multisigma: process all multisig columns together
     for col in multisig_col:
-        # * for multisigma, get two universes, ps1 and ms1
+        # for multisigma, get two universes, ps1 and ms1
         ps1_col = col 
         ms1_col = tuple([x if x!='ps1' else 'ms1' for x in list(col)])
-        weights = np.stack([df[col].to_numpy(),df[col].to_numpy()]).T
-        hists = np.apply_along_axis(get_hist, 0, weights, cv_input, bins)
+        ps1_weights = df[ps1_col].to_numpy()
+        ms1_weights = df[ms1_col].to_numpy()
+        
+        hists = np.zeros((nbins-1, 2))
+        hists[:, 0] = get_hist(ps1_weights, cv_input, bins)
+        hists[:, 1] = get_hist(ms1_weights, cv_input, bins)
+        
         syst_dict[col[2]] = [hists]
+    
+    # For multisim: process all multisim columns together
     for col in multisim_col:
-        # * for multisim, get all universes automatically
+        # for multisim, get all universes automatically
         weights = df[col].to_numpy()
-        hists = np.apply_along_axis(get_hist, 0, weights, cv_input, bins)
+        n_universes = weights.shape[1]
+        hists = np.zeros((nbins-1, n_universes))
+        
+        # Compute histograms for all universes in this column
+        for i in range(n_universes):
+            hists[:, i] = get_hist(weights[:, i], cv_input, bins)
+        
         syst_dict[col[2]] = [hists]
         
     for key in syst_dict.keys():
