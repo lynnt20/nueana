@@ -192,7 +192,8 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
     # also need to rescale the syst cov matrices
     for i in range(len(df)):
         stats_err += np.sqrt(stats[:,i])*scale[i]
-        systs_err += systs_arr[:,i]*scale[i]
+        if i==0:
+            systs_err += systs_arr[:,i]*scale[i]
 
     if normalize:
         norm_factor = np.sum(hists) * np.diff(bins)
