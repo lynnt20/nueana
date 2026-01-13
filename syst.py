@@ -61,7 +61,8 @@ def calc_matrices(var_arr,cv):
 
 def get_syst(indf: pd.DataFrame,
              var: str | tuple,
-             bins: np.ndarray):
+             bins: np.ndarray,
+             scale: float = 1.0) -> dict:
     df = indf.copy()
     
     if isinstance(df, pd.DataFrame):
@@ -97,10 +98,11 @@ def get_syst(indf: pd.DataFrame,
     syst_dict = {}
     nbins = len(bins) 
 
-    # ! TODO: optimize by stacking weights and doing one hist call per syst type
     for col in unisim_col: 
         # * for unisim, get straight from `morph`
         weights = df[col].to_numpy()
+        weights[np.isnan(weights)] = 1.0
+        weights *= scale
         hists = np.apply_along_axis(get_hist, 0, weights, cv_input, bins)
         # rename key to only include the relevant part of the column 
         syst_dict[col[2]] = [np.reshape(hists,(nbins-1,-1))]
@@ -108,12 +110,16 @@ def get_syst(indf: pd.DataFrame,
         # * for multisigma, get two universes, ps1 and ms1
         ps1_col = col 
         ms1_col = tuple([x if x!='ps1' else 'ms1' for x in list(col)])
-        weights = np.stack([df[col].to_numpy(),df[col].to_numpy()]).T
+        weights *= scale
+        weights = np.stack([np.nan_to_num(df[ps1_col].to_numpy(),copy=False,nan=1.0),
+                            np.nan_to_num(df[ms1_col].to_numpy(),copy=False,nan=1.0)]).T
         hists = np.apply_along_axis(get_hist, 0, weights, cv_input, bins)
         syst_dict[col[2]] = [hists]
     for col in multisim_col:
         # * for multisim, get all universes automatically
         weights = df[col].to_numpy()
+        weights[np.isnan(weights)] = 1.0
+        weights *= scale
         hists = np.apply_along_axis(get_hist, 0, weights, cv_input, bins)
         syst_dict[col[2]] = [hists]
         
