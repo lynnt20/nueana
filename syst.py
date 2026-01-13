@@ -6,34 +6,33 @@ from .utils import ensure_lexsorted
 def get_hist(weight,data,bins): return np.histogram(data,bins=bins,weights=weight)[0]
 
 def calc_matrices(var_arr,cv):
-    def calc_matrices(var_arr, cv):
-        """
-        Calculate covariance, fractional covariance, and correlation matrices.
-        This function computes statistical matrices from variations around a central value,
-        commonly used in systematic uncertainty analysis.
-        Parameters
-        ----------
-        var_arr : np.ndarray
-            2D array of shape (nbins, nuniv) containing variations for each bin and universe.
-            nbins is the number of bins, nuniv is the number of universes/variations.
-        cv : np.ndarray
-            1D array of shape (nbins,) containing central values for each bin.
-        Returns
-        -------
-        cov : np.ndarray
-            2D array of shape (nbins, nbins) containing the covariance matrix.
-        cov_frac : np.ndarray
-            2D array of shape (nbins, nbins) containing the fractional covariance matrix
-            (normalized by central values).
-        corr : np.ndarray
-            2D array of shape (nbins, nbins) containing the correlation matrix,
-            derived from the covariance matrix.
-        Notes
-        -----
-        - Warnings about invalid values in division are suppressed (e.g., division by zero).
-        - The matrices returned are normalized to n_universes. 
-        - The correlation matrix is computed as: corr[i,j] = cov[i,j] / sqrt(cov[i,i] * cov[j,j])
-        """
+    """
+    Calculate covariance, fractional covariance, and correlation matrices.
+    This function computes statistical matrices from variations around a central value,
+    commonly used in systematic uncertainty analysis.
+    Parameters
+    ----------
+    var_arr : np.ndarray
+        2D array of shape (nbins, nuniv) containing variations for each bin and universe.
+        nbins is the number of bins, nuniv is the number of universes/variations.
+    cv : np.ndarray
+        1D array of shape (nbins,) containing central values for each bin.
+    Returns
+    -------
+    cov : np.ndarray
+        2D array of shape (nbins, nbins) containing the covariance matrix.
+    cov_frac : np.ndarray
+        2D array of shape (nbins, nbins) containing the fractional covariance matrix
+        (normalized by central values).
+    corr : np.ndarray
+        2D array of shape (nbins, nbins) containing the correlation matrix,
+        derived from the covariance matrix.
+    Notes
+    -----
+    - Warnings about invalid values in division are suppressed (e.g., division by zero).
+    - The matrices returned are normalized to n_universes. 
+    - The correlation matrix is computed as: corr[i,j] = cov[i,j] / sqrt(cov[i,i] * cov[j,j])
+    """
     
     nbins = len(cv)
     nuniv = len(var_arr[1])
