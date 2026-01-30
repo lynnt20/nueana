@@ -60,16 +60,12 @@ def calc_matrices(var_arr,cv):
 
 def get_syst(indf: pd.DataFrame,
              var: str | tuple,
-             bins: np.ndarray,
-             scale: float = 1.0) -> dict:
+             bins: np.ndarray) -> dict:
     df = indf.copy()
     
     if isinstance(df, pd.DataFrame):
         df = ensure_lexsorted(df, axis=0)
         df = ensure_lexsorted(df, axis=1)
-    
-    cv_input = df[var]
-    cv_hist = np.histogram(cv_input,bins)[0]
 
     unisim_col = []
     multisig_col  = [] 
@@ -84,8 +80,11 @@ def get_syst(indf: pd.DataFrame,
                     univ_level = i 
                     break
             break
-    
+
+    scaling = np.ones(indf.shape[0])
     for col in df.columns:
+        if "flux_pot_norm" in col: 
+            scaling = df[col].to_numpy()
         if 'morph' in col:
             unisim_col.append(col)
         elif 'ps1' in col:
@@ -93,7 +92,13 @@ def get_syst(indf: pd.DataFrame,
         elif "univ" in "".join(list(col)):
             if col[:univ_level] not in multisim_col: 
                 multisim_col.append(col[:univ_level])
-            
+    if np.array_equal(scaling,np.ones(indf.shape[0])):
+        print("No flux-averaged POT normalization found; flux normalization will be equal to one.")
+
+    # get cv histogram
+    cv_input = df[var]
+    cv_hist = np.histogram(cv_input,bins,weights=scaling)[0]
+
     syst_dict = {}
     nbins = len(bins) 
 
@@ -101,7 +106,7 @@ def get_syst(indf: pd.DataFrame,
         # * for unisim, get straight from `morph`
         weights = df[col].to_numpy()
         weights[np.isnan(weights)] = 1.0
-        weights *= scale
+        weights *= scaling
         hists = np.apply_along_axis(get_hist, 0, weights, cv_input, bins)
         # rename key to only include the relevant part of the column 
         syst_dict[col[2]] = [np.reshape(hists,(nbins-1,-1))]
@@ -109,19 +114,18 @@ def get_syst(indf: pd.DataFrame,
         # * for multisigma, get two universes, ps1 and ms1
         ps1_col = col 
         ms1_col = tuple([x if x!='ps1' else 'ms1' for x in list(col)])
-        weights *= scale
         weights = np.stack([np.nan_to_num(df[ps1_col].to_numpy(),copy=False,nan=1.0),
                             np.nan_to_num(df[ms1_col].to_numpy(),copy=False,nan=1.0)]).T
+        weights *= scaling[:,np.newaxis]
         hists = np.apply_along_axis(get_hist, 0, weights, cv_input, bins)
         syst_dict[col[2]] = [hists]
     for col in multisim_col:
         # * for multisim, get all universes automatically
         weights = df[col].to_numpy()
         weights[np.isnan(weights)] = 1.0
-        weights *= scale
+        weights *= scaling[:,np.newaxis]
         hists = np.apply_along_axis(get_hist, 0, weights, cv_input, bins)
         syst_dict[col[2]] = [hists]
-        
     for key in syst_dict.keys():
         hists = syst_dict[key][0]
         cov, frac, corr = calc_matrices(hists,cv_hist)
