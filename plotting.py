@@ -33,7 +33,7 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
              mult_factor: float = 1.0,
              cut_val: list[float] | None = None,
              plot_err: bool = True,
-             systs: bool = False,
+             systs: bool | np.ndarray = None,
              pdg: bool = False,
              pdg_col: tuple | str = 'pfp_shw_truth_p_pdg',
              hatch: list[str] | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -95,7 +95,6 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
     if (type(scale)==float or type(scale)==np.float64): scale = [scale]
     if scale == None: scale = list(np.ones(len(df)))
     assert (len(scale) == len(df))
-
     # Apply to each provided dataframe (both row-index and columns)
     for ii, this_df in enumerate(df):
         if isinstance(this_df, pd.DataFrame):
@@ -171,29 +170,31 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
         if "univ_" in "_".join(list(col)):
             found_systs = True
             break
-    if (systs==True) & (found_systs): 
+    if (type(systs) is np.ndarray):
+        found_systs = True
+        systs_arr = systs
+        syst_dict = {}
+    elif (systs==True) & (found_systs): 
         # ! TODO now hardcoded for the first entry
-        this_mc = df[0]
-        this_sig = this_mc[this_mc.signal < signal_dict['cosmic']]
-        syst_dict = get_syst(indf=this_sig,var=var,bins=bins)
-        total_cov = np.zeros((len(bins)-1,len(bins)-1))
+        syst_dict = get_syst(indf=df[0],var=var,bins=bins)
+        total_cov = np.zeros(len(bins)-1)
         for key in syst_dict.keys():
-            total_cov += syst_dict[key][1]
-        systs_arr = np.reshape(np.sqrt(np.diag(total_cov)),(-1,1))
+            total_cov += np.diag(syst_dict[key]['cov'])
+        systs_arr = np.sqrt(total_cov)
     else:
         if (systs==True) & (found_systs==False):
             print("can't find universes in the input df, ignoring systematic error bars")
             systs=False
-        systs_arr = np.reshape(np.zeros(len(bins)-1),(-1,1))
+        systs_arr = np.zeros(len(bins)-1)
         syst_dict = {}
-        
+
     # statistical error is only on the input statistics, and then we rescale 
     # if we're using multiple input mc that has different scalings, 
     # also need to rescale the syst cov matrices
     for i in range(len(df)):
         stats_err += np.sqrt(stats[:,i])*scale[i]
         if i==0:
-            systs_err += systs_arr[:,i]*scale[i]
+            systs_err += systs_arr*scale[i]
 
     if normalize:
         norm_factor = np.sum(hists) * np.diff(bins)
@@ -222,7 +223,7 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
                          "lw":0.0,"facecolor":"none","hatch":"xxx",
                          "zorder":ncategories+1}
         # fill_between needs the *first* entry to be repeated...
-        if systs:
+        if (found_systs):
             min_systs_err = steps[-1]     - np.append(systs_err[0],systs_err)
             pls_systs_err = steps[-1]     + np.append(systs_err[0],systs_err)
             min_stats_err = min_systs_err - np.append(stats_err[0],stats_err)
@@ -241,12 +242,9 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
     
     total_err = stats_err + systs_err
 
-    # * if this is a multiindex dataframe, recast `var` 
-    # * (since we're done using it) to be nice as a string!
-    if type(var)==tuple: var = '_'.join(var)
-    ax.set_xlabel(var)      if xlabel == "" else ax.set_xlabel(xlabel)
-    ax.set_ylabel("Counts") if ylabel == "" else ax.set_ylabel(ylabel)
-    ax.set_title (var)      if title  == "" else ax.set_title (title)
+    ax.set_xlabel('_'.join(var)) if xlabel == "" else ax.set_xlabel(xlabel)
+    ax.set_ylabel("Counts")      if ylabel == "" else ax.set_ylabel(ylabel)
+    ax.set_title ('_'.join(var)) if title  == "" else ax.set_title (title)
     ax.legend(ncol=2)
 
     return bins, steps, total_err, syst_dict
@@ -318,21 +316,12 @@ def plot_mc_data(mc_dfs: pd.DataFrame | list[pd.DataFrame],
                  data_df: pd.DataFrame,
                  var: str | tuple,
                  bins: list[float] | np.ndarray,
-                 scale: float | list[float] | None = None,
-                 pdg: bool = False,
-                 pdg_col: tuple | str = 'pfp_shw_truth_p_pdg',
-                 xlabel: str = "",
-                 ylabel: str = "",
-                 title:  str = "",
-                 counts: bool = False, 
-                 normalize: bool = False,
-                 systs: np.ndarray = np.array([]),
                  figsize: tuple[int, int] = (7, 6),
                  cut_val: list[float] = [],
                  ratio_min: float = 0.0,
                  ratio_max: float = 2.0,
-                 hatch: list[str] | None = None,
-                 savefig: str = "") -> tuple[plt.Figure, plt.Axes, plt.Axes]:
+                 savefig: str = "",
+                 **kwargs) -> tuple[plt.Figure, plt.Axes, plt.Axes]:
     """Create a combined MC stack + data overlay plot with data/MC ratio subplot.
 
     Parameters
@@ -345,31 +334,17 @@ def plot_mc_data(mc_dfs: pd.DataFrame | list[pd.DataFrame],
         Column (or multi-index tuple) to histogram.
     bins : array-like
         Bin edges for the histograms.
-    scale : float or list[float], optional
-        Scaling factors applied to each MC dataframe. If None, all scales are 1.0.
-    pdg : bool, default False
-        If True, instruct `plot_var` to split MC by PDG instead of signal type.
-    pdg_col : tuple | str, default 'pfp_shw_truth_p_pdg'
-        Column (or multi-index tuple) containing the PDG code per particle (used when ``pdg``
-        is True).
-    xlabel, ylabel, title : str, optional
-        Labels and title for the main axis. If blank, sensible defaults are used.
-    counts : bool, default False
-        If True, append event counts to legend labels.
-    normalize : bool, default False
-        If True, normalize both MC and data histograms to unit area.
-    systs : numpy.ndarray, optional
-        Optional systematic contribution per bin per MC input (shape (n_bins, n_dfs)).
     figsize : tuple, default (7, 6)
         Figure size.
     cut_val : list, optional
         x-values at which to draw vertical cut lines on both main and ratio axes.
     ratio_min, ratio_max : float, default (0.0, 2.0)
         y-limits for the ratio subplot.
-    hatch : list, optional
-        Hatch patterns passed to `plot_var`.
     savefig : str, optional
         If provided, path where the figure will be saved (bbox_inches='tight').
+    **kwargs
+        All other arguments (scale, pdg, pdg_col, xlabel, ylabel, title, counts, normalize,
+        systs, hatch, etc.) are forwarded to :func:`plot_var`.
 
     Returns
     -------
@@ -381,13 +356,11 @@ def plot_mc_data(mc_dfs: pd.DataFrame | list[pd.DataFrame],
     ax_main = fig.add_subplot(gs[0])
     ax_sub = fig.add_subplot(gs[1])
 
-    data_args = dict(df=data_df, var=var, bins=bins, ax=ax_main, normalize=normalize)
-    mc_args   = dict(df=mc_dfs,  var=var, bins=bins, ax=ax_main, normalize=normalize,
-                     scale=scale, systs=systs, hatch=hatch, counts=counts,
-                     xlabel=xlabel, ylabel=ylabel,title=title)
+    data_args = dict(df=data_df, var=var, bins=bins, ax=ax_main, normalize=kwargs.get('normalize', False))
+    mc_args   = dict(df=mc_dfs, var=var, bins=bins, ax=ax_main, **kwargs)
 
     data_hist, data_err, data_plot = data_plot_overlay(**data_args)
-    mc_bins, mc_steps, mc_err, mc_dict = plot_var(**mc_args,pdg=pdg,pdg_col=pdg_col)
+    mc_bins, mc_steps, mc_err, mc_dict = plot_var(**mc_args)
     
     xmin, xmax = ax_main.get_xlim()
     
