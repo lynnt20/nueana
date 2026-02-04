@@ -3,6 +3,7 @@ from .constants import signal_dict
 
 import sys; sys.path.append("/exp/sbnd/app/users/lynnt/cafpyana")
 from makedf.util import *
+from pyanalib.pandas_helpers import *
 
 n_max_concat=10
 
@@ -51,6 +52,35 @@ def ensure_lexsorted(frame, axis):
         return frame.sort_index(axis=axis)
     return frame
 
+# helper functions for reproducing ccnue art filter logic
+def whereTPC(df):
+    xmax = 202.20000000000002
+    xmin = -202.20000000000002
+    ymax = 203.732262000002
+    ymin = -203.732262000002
+    zmax = 500#.09999999999997
+    zmin = 0
+    return (df.x > xmin) & (df.x < xmax) & (df.y > ymin) & (df.y < ymax) & (df.z > zmin) & (df.z < zmax)
+
+def ccnuefilt(df):
+    return whereTPC(df.position) & (df.iscc==1) & (np.isnan(df.e.genE)==False) & (abs(df.pdg)==12)
+
+def remove_ccnue(indf):
+    df = indf.copy()
+    bnb_nuecc_idx = df[ccnuefilt(df.slc.truth)].reset_index()[[('__ntuple', '', '', '', '', ''),('entry', '', '', '', '', '')]].drop_duplicates()
+
+    indexes = df.index.names
+    df = multicol_merge(bnb_nuecc_idx,
+                        df.reset_index(),
+                        left_on=[('__ntuple', '', '', '', '', ''),('entry', '', '', '', '', '')],
+                        right_on=[('__ntuple', '', '', '', '', ''),('entry', '', '', '', '', '')],
+                        how='outer',indicator=True).set_index(indexes)
+    print("% of slices dropped: ", np.round(len(df[df._merge =='both'])/len(df)*100,2)) 
+    df = df[df._merge == 'right_only']
+    df = ensure_lexsorted(df,axis=0)
+    df = ensure_lexsorted(df,axis=1)
+    df = df.drop(columns=['_merge'])
+    return df
 
 def define_signal(indf: pd.DataFrame,prefix=None):
     # sort by row 
@@ -76,10 +106,12 @@ def define_signal(indf: pd.DataFrame,prefix=None):
     nudf["signal"] = np.where(whereFV & (mcdf.iscc==1) & (abs(mcdf.pdg)==12), signal_dict["othernueCC"], nudf["signal"]) # nue cc FV
     nudf["signal"] = np.where(whereFV & (mcdf.iscc==1) & (abs(mcdf.pdg)==14) & (mcdf.npi0 == 0), signal_dict["othernumuCC"], nudf["signal"]) # numu cc other FV
     nudf["signal"] = np.where(whereFV & (mcdf.iscc==0) & (mcdf.npi0 == 0), signal_dict["otherNC"], nudf["signal"]) # nc other FV
-    nudf["signal"] = np.where(whereFV == False & whereAV & (nudf["signal"]<0), signal_dict["nonFV"], nudf['signal']) # nonFV
+    nudf["signal"] = np.where(whereAV & (nudf["signal"]<0), signal_dict["nonFV"], nudf['signal']) # nonFV
     nudf["signal"] = np.where(whereAV == False, signal_dict["dirt"], nudf["signal"]) # dirt
     nudf["signal"] = np.where(np.isnan(mcdf.E), signal_dict['cosmic'], nudf["signal"])
     
     nudf["signal"] = np.where(whereFV & whereCCnue, signal_dict["nueCC"], nudf["signal"])
+    if ((nudf.signal < 0) | (nudf.signal >= len(signal_dict))).any(): 
+        print("Warning: unidentified signal/bacgkr channels present.")
     indf["signal"] = nudf["signal"]
     return indf
