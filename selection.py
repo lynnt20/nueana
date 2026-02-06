@@ -36,6 +36,7 @@ def InRealisticAV(df):
     return (((df.z >= 250) & (df.y < 100)) | (df.z < 250))
 
 def select(indf, 
+           spring=False,
            realisticAV=True,
            spill_start=0.2, 
            spill_end=2.2, 
@@ -95,7 +96,10 @@ def select(indf,
     df_dict['flash matching'] = df
 
     # * require that primary shower > min_shower_energy
-    df = df[df.primshw.shw.maxplane_energy > min_shower_energy]
+    if spring:
+        df = df[df.primshw.shw.maxplane_energy > min_shower_energy]
+    else:
+        df = df[df.primshw.shw.bestplane_energy > min_shower_energy]
     df_dict['shower energy'] = df 
 
     # * require track length < max_track_length cm
