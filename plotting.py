@@ -176,7 +176,7 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
         syst_dict = {}
     elif (systs==True) & (found_systs): 
         # ! TODO now hardcoded for the first entry
-        syst_dict = get_syst(indf=df[0],var=var,bins=bins)
+        syst_dict = get_syst(indf=df[0],var=var,bins=bins,scale=False)
         total_cov = np.zeros(len(bins)-1)
         for key in syst_dict.keys():
             total_cov += np.diag(syst_dict[key]['cov'])

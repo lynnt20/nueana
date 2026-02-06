@@ -3,10 +3,41 @@ import pandas as pd
 import warnings
 from .utils import ensure_lexsorted
 from .selection import select
+from numba import jit
 
 def get_hist(weight,data,bins): return np.histogram(data,bins=bins,weights=weight)[0]
 
+# Vectorized histogram computation instead of apply_along_axis
+# def compute_hists(weights_2d, cv_data, bins):
+#     """Vectorized histogram for multiple universes"""
+#     nuniv = weights_2d.shape[1] if weights_2d.ndim > 1 else 1
+#     hists = np.zeros((nbins, nuniv))
+#     for i in range(nuniv):
+#         w = weights_2d[:, i] if weights_2d.ndim > 1 else weights_2d
+#         hists[:, i] = np.histogram(cv_data, bins, weights=w)[0]
+#     return hists
+    
+@jit(nopython=True)
+def calc_matrices_numba(var_arr, cv):
+    diffs = var_arr - cv[:, np.newaxis]
+    diffs_norm = diffs / cv[:, np.newaxis]
+
+    cov = (diffs @ diffs.T) / diffs.shape[1]
+    cov_frac = (diffs_norm @ diffs_norm.T) / diffs_norm.shape[1]
+    corr = cov / np.sqrt(np.outer(np.diag(cov),np.diag(cov)))
+    return cov, cov_frac, corr
+
 def calc_matrices(var_arr,cv):
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore",message="invalid value encountered in divide")
+        diffs = var_arr - cv[:, np.newaxis]
+        diffs_norm = diffs / cv[:, np.newaxis]
+        cov = (diffs @ diffs.T) / diffs.shape[1]
+        cov_frac = (diffs_norm @ diffs_norm.T) / diffs_norm.shape[1]
+        corr = cov / np.sqrt(np.outer(np.diag(cov),np.diag(cov)))
+    return cov, cov_frac, corr
+
+def calc_matrices_explicit(var_arr,cv):
     """
     Calculate covariance, fractional covariance, and correlation matrices.
     This function computes statistical matrices from variations around a central value,
@@ -38,6 +69,7 @@ def calc_matrices(var_arr,cv):
     
     nbins = len(cv)
     nuniv = len(var_arr[1])
+    print("Calculating matrices with ", nuniv, " universes and ", nbins, " bins.")
 
     cov = np.zeros((nbins,nbins))
     cov_frac = np.zeros((nbins,nbins))
@@ -62,7 +94,8 @@ def calc_matrices(var_arr,cv):
 
 def get_syst(indf: pd.DataFrame,
              var: str | tuple,
-             bins: np.ndarray) -> dict:
+             bins: np.ndarray,
+             scale: bool = True) -> dict:
     df = indf.copy()
     
     if isinstance(df, pd.DataFrame):
@@ -85,7 +118,7 @@ def get_syst(indf: pd.DataFrame,
 
     scaling = np.ones(indf.shape[0])
     for col in df.columns:
-        if "flux_pot_norm" in col: 
+        if ("flux_pot_norm" in col) and scale: 
             scaling = df[col].to_numpy()
         if 'morph' in col:
             unisim_col.append(col)
@@ -94,7 +127,7 @@ def get_syst(indf: pd.DataFrame,
         elif "univ" in "".join(list(col)):
             if col[:univ_level] not in multisim_col: 
                 multisim_col.append(col[:univ_level])
-    if np.array_equal(scaling,np.ones(indf.shape[0])):
+    if np.array_equal(scaling,np.ones(indf.shape[0])) and scale:
         print("No flux-averaged POT normalization found; flux normalization will be equal to one.")
 
     # get cv histogram
@@ -186,7 +219,7 @@ def mcstat(indf, nuniv:int=100 , cols: list=['ntuple','entry','rec.slc..index','
     return df.join(mcstat_univ_wgt)
 
 
-def get_detvar_systs(detvar_dict, var, bins, stage,**kwargs):
+def get_detvar_systs(detvar_dict,stage,var, bins,**kwargs):
     matrices_dict = {}
     for i, key in enumerate(detvar_dict.keys()): 
         this_dict = detvar_dict[key]
@@ -199,6 +232,10 @@ def get_detvar_systs(detvar_dict, var, bins, stage,**kwargs):
         cv_hist = np.histogram(ensure_lexsorted(select(this_cv,**kwargs)[stage],axis=1)[var],bins=bins)[0]
         dv_hist = np.histogram(ensure_lexsorted(select(this_dv,**kwargs)[stage],axis=1)[var],bins=bins)[0]
         
-        cov, cov_frac, corr = nue.calc_matrices(var_arr=np.reshape(dv_hist/this_scale,(len(bins)-1,-1)),cv=cv_hist/this_scale)
-        matrices_dict[key] = {'cov': cov,'cov_frac': cov_frac,'corr': corr}
+        cov, cov_frac, corr = calc_matrices(var_arr=np.reshape(dv_hist/this_scale,(len(bins)-1,-1)),cv=cv_hist/this_scale)
+        matrices_dict[key] = {'hists':np.reshape(dv_hist/this_scale,(len(bins)-1,-1)),
+                              'cov': cov,
+                              'cov_frac': cov_frac,
+                              'corr': corr, 
+                              'hist_cv': cv_hist/this_scale}
     return matrices_dict
