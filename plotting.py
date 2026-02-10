@@ -115,6 +115,9 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
     stats = np.zeros((len(bin_steps),len(df)))
     stats_err   = np.zeros(len(bin_steps))
     systs_err   = np.zeros(len(bin_steps))
+    
+    # Check if systs is provided as array (already includes stats)
+    systs_is_array = isinstance(systs, np.ndarray)
 
     df_counter = 0
     if pdg==False: 
@@ -170,7 +173,9 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
         if "univ_" in "_".join(list(col)):
             found_systs = True
             break
-    if (type(systs) is np.ndarray):
+    
+    if systs_is_array:
+        # systs array already includes statistical uncertainty
         found_systs = True
         systs_arr = systs
         syst_dict = {}
@@ -188,18 +193,21 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
         systs_arr = np.zeros(len(bins)-1)
         syst_dict = {}
 
-    # statistical error is only on the input statistics, and then we rescale 
-    # if we're using multiple input mc that has different scalings, 
-    # also need to rescale the syst cov matrices
+    # Only calculate statistical error if systs not provided as array
+    if not systs_is_array:
+        for i in range(len(df)):
+            stats_err += np.sqrt(stats[:,i])*scale[i]
+    
+    # Systematic error calculation
     for i in range(len(df)):
-        stats_err += np.sqrt(stats[:,i])*scale[i]
         if i==0:
             systs_err += systs_arr*scale[i]
 
     if normalize:
         norm_factor = np.sum(hists) * np.diff(bins)
         hists /= norm_factor
-        stats_err /= norm_factor
+        if not systs_is_array:
+            stats_err /= norm_factor
         systs_err /= norm_factor    
         
     for i in range(ncategories):
@@ -215,15 +223,23 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
                          edgecolor=mpl.colors.to_rgba(colors[i],1.0)   if plot_label.find('cosmic') else mpl.colors.to_rgba(colors[-1],1.0),
                          lw=1.5, 
                          hatch=hatch[i],zorder=(ncategories-i),label=plot_label)
+    
     if plot_err: 
-        stats_options = {"step":"pre", "color":mpl.colors.to_rgba("gray", alpha=0.9),
-                         "lw":0.0,"facecolor":"none","hatch":"....",
-                         "zorder":ncategories+1}
         systs_options = {"step":"pre", "color":mpl.colors.to_rgba("gray", alpha=0.8),
                          "lw":0.0,"facecolor":"none","hatch":"xxx",
                          "zorder":ncategories+1}
+        
         # fill_between needs the *first* entry to be repeated...
-        if (found_systs):
+        if systs_is_array:
+            # systs array already includes both stat + syst
+            min_total_err = steps[-1] - np.append(systs_err[0], systs_err)
+            pls_total_err = steps[-1] + np.append(systs_err[0], systs_err)
+            ax.fill_between(bins, min_total_err, pls_total_err, **systs_options, label="MC stat.+syst.")
+        elif found_systs:
+            # Separate stat and syst bands
+            stats_options = {"step":"pre", "color":mpl.colors.to_rgba("gray", alpha=0.9),
+                             "lw":0.0,"facecolor":"none","hatch":"....",
+                             "zorder":ncategories+1}
             min_systs_err = steps[-1]     - np.append(systs_err[0],systs_err)
             pls_systs_err = steps[-1]     + np.append(systs_err[0],systs_err)
             min_stats_err = min_systs_err - np.append(stats_err[0],stats_err)
@@ -232,6 +248,10 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
             ax.fill_between(bins, min_systs_err, min_stats_err, **stats_options,label="MC stat.")
             ax.fill_between(bins, pls_systs_err, pls_stats_err, **stats_options)
         else: 
+            # Only stat errors
+            stats_options = {"step":"pre", "color":mpl.colors.to_rgba("gray", alpha=0.9),
+                             "lw":0.0,"facecolor":"none","hatch":"....",
+                             "zorder":ncategories+1}
             min_stats_err = steps[-1] - np.append(stats_err,stats_err[-1])
             pls_stats_err = steps[-1] + np.append(stats_err,stats_err[-1])
             ax.fill_between(bins, min_stats_err, pls_stats_err, **stats_options,label="MC stat.")
@@ -240,7 +260,8 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
         for i in range(len(cut_val)):
             ax.axvline(cut_val[i],lw=2,color="gray",linestyle="--",zorder=6)
     
-    total_err = stats_err + systs_err
+    # Total error is just systs_err if array provided, otherwise stat + syst
+    total_err = systs_err if systs_is_array else (stats_err + systs_err)
 
     ax.set_xlabel('_'.join(var)) if xlabel == "" else ax.set_xlabel(xlabel)
     ax.set_ylabel("Counts")      if ylabel == "" else ax.set_ylabel(ylabel)
