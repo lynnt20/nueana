@@ -225,12 +225,11 @@ def mcstat(indf, nuniv:int=100 , cols: list=['__ntuple','entry','rec.slc..index'
     mcstat_univ_wgt = pd.DataFrame(1.0,index=df.index,columns=mcstat_univ_cols,)
 
     for iuniv in tqdm(range(nuniv)):
-        weights = np.zeros(len(unique_seeds))
-        for ievt in range(len(unique_seeds)):
-            combined_seed = (unique_seeds[ievt] + univ_seeds[iuniv] ) % 2**32
-            rng = np.random.default_rng(combined_seed)
-            weights[ievt] = rng.poisson(1.0)
-        mcstat_univ_wgt[("slc","truth","MCstat", f"univ_{iuniv}", "", "")] = weights
+        combined_seeds = (unique_seeds + univ_seeds[iuniv]) % 2**32
+        weights = np.array([
+            np.random.default_rng(int(s)).poisson(1.0) for s in combined_seeds
+        ])
+        mcstat_univ_wgt[("slc", "truth", "MCstat", f"univ_{iuniv}", "", "")] = weights
     return df.join(mcstat_univ_wgt)
 
 
