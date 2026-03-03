@@ -16,7 +16,7 @@ from matplotlib.gridspec import GridSpec
 import pandas as pd
 import warnings
 
-from .constants import signal_dict, signal_labels, pdg_dict, signal_colors
+from .constants import signal_dict, signal_labels, pdg_dict, signal_colors, generic_dict, generic_labels, generic_colors
 from .utils import ensure_lexsorted
 from .syst import *
 
@@ -36,13 +36,16 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
              systs: bool | np.ndarray = None,
              pdg: bool = False,
              pdg_col: tuple | str = 'pfp_shw_truth_p_pdg',
-             hatch: list[str] | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+             hatch: list[str] | None = None,
+             generic: bool = False) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Plot a variable as stacked histograms for signal categories or PDG types.
 
-    This function supports two modes controlled by ``pdg``:
-    - pdg=False (default): stack by interaction type using ``signal_dict``.
+    This function supports three modes controlled by ``pdg`` and ``generic``:
+    - pdg=False, generic=False (default): stack by interaction type using ``signal_dict``.
     - pdg=True: stack by particle PDG using ``pdg_dict``; adds 'cosmic' and
       'other' as the last two categories.
+    - generic=True: stack by broad category using ``generic_dict`` (nuFV, nonFV,
+      dirt, cosmic). Takes precedence over ``pdg`` if both are True.
 
     Parameters
     ----------
@@ -83,6 +86,10 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
         is True).
     hatch : list, optional
         Optional hatch patterns per category.
+    generic : bool, default False
+        When True, stack by broad category (FV neutrino, non-FV, dirt, cosmic) using
+        ``generic_dict`` / ``generic_labels`` / ``generic_colors``. Takes precedence
+        over ``pdg`` if both are True.
 
     Returns
     -------
@@ -102,9 +109,9 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
             this_df = ensure_lexsorted(this_df, axis=1)
             df[ii] = this_df
     
-    colors = signal_colors
+    colors = generic_colors if generic else signal_colors
     if ax is None: ax = plt.gca()
-    ncategories = len(pdg_dict)+2 if pdg else len(signal_dict)
+    ncategories = len(generic_dict) if generic else (len(pdg_dict)+2 if pdg else len(signal_dict))
     if hatch == None: hatch = [""]*ncategories
     alpha = 0.25 if pdg else 0.4
     
@@ -120,11 +127,20 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
     systs_is_array = isinstance(systs, np.ndarray)
 
     df_counter = 0
-    if pdg==False: 
+    if generic:
+        for this_df, this_scale in zip(df,scale):
+            for i, entry in enumerate(generic_dict):
+                this_signal_val = generic_dict[entry]
+                hist, _____ = np.histogram(this_df[this_df.signal==this_signal_val][var],bins=bins)
+                stats[:,df_counter] += hist
+                hists[i] = hists[i] + this_scale*hist
+            df_counter += 1
+
+    elif pdg==False: 
         for this_df, this_scale in zip(df,scale):
             for i, entry in enumerate(signal_dict):
                 this_signal_val = signal_dict[entry]
-                hist, bin_edges = np.histogram(this_df[this_df.signal==this_signal_val][var],bins=bins)
+                hist, _____ = np.histogram(this_df[this_df.signal==this_signal_val][var],bins=bins)
                 stats[:,df_counter] += hist
                 hists[i] = hists[i] + this_scale*hist
             df_counter += 1
@@ -169,11 +185,12 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
 
     # check if systematic cols are inside the df
     found_systs = False
-    for col in df[0].columns:
-        if "univ_" in "_".join(list(col)):
-            found_systs = True
-            break
-    
+    if (systs_is_array== False) and (systs==True):
+        for col in df[0].columns:
+            if "univ_" in "_".join(list(col)):
+                found_systs = True
+                break
+        
     if systs_is_array:
         # systs array already includes statistical uncertainty
         found_systs = True
@@ -204,14 +221,20 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
             systs_err += systs_arr*scale[i]
 
     if normalize:
-        norm_factor = np.sum(hists) * np.diff(bins)
-        hists /= norm_factor
+        # Use actual bin widths for proper normalization
+        bin_widths = np.diff(bins)
+        # Normalize each bin by its width, then scale by total integral
+        hists_per_width = hists / bin_widths[np.newaxis, :]
+        total_integral = np.sum(hists_per_width * bin_widths)
+        
+        # Apply normalization
+        hists = hists_per_width / total_integral
         if not systs_is_array:
-            stats_err /= norm_factor
-        systs_err /= norm_factor    
+            stats_err = (stats_err / bin_widths) / total_integral
+        systs_err = (systs_err / bin_widths) / total_integral
         
     for i in range(ncategories):
-        plot_label = (list(pdg_dict.keys())+['cosmic']+['other'])[i] if pdg else signal_labels[i]
+        plot_label = generic_labels[i] if generic else ((list(pdg_dict.keys())+['cosmic']+['other'])[i] if pdg else signal_labels[i])
         if (mult_factor!= 1.0) & (i==0): plot_label +=  f" [x{mult_factor}]"
         if counts: plot_label += f" ({int(hist_counts[i]):,})" if hist_counts[i] < 1e6 else f"({hist_counts[i]:.2e}"
         
@@ -266,7 +289,7 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
     ax.set_xlabel('_'.join(var)) if xlabel == "" else ax.set_xlabel(xlabel)
     ax.set_ylabel("Counts")      if ylabel == "" else ax.set_ylabel(ylabel)
     ax.set_title ('_'.join(var)) if title  == "" else ax.set_title (title)
-    ax.legend(ncol=2)
+    ax.legend(ncol=2,loc='upper right')
 
     return bins, steps, total_err, syst_dict
 
@@ -325,10 +348,17 @@ def data_plot_overlay(df: pd.DataFrame,
     errors = np.sqrt(hist)
     label = "data" 
     label += f" ({np.sum(hist,dtype=int):,})" if np.sum(hist) < 1e6 else f"({np.sum(hist):.2e}"
+    
     if normalize:
-        total_area = np.sum(hist)*np.diff(edges)
-        hist = hist/(total_area)
-        errors = errors/(total_area)
+        # Use actual bin widths for proper normalization
+        bin_widths = np.diff(edges)
+        # Normalize by bin width to get density, then by total integral
+        hist_per_width = hist / bin_widths
+        total_integral = np.sum(hist_per_width * bin_widths)
+        
+        hist = hist_per_width / total_integral
+        errors = (errors / bin_widths) / total_integral
+    
     bin_centers = 0.5*(edges[1:] + edges[:-1])
     plot = ax.errorbar(bin_centers, hist, yerr=errors, fmt='.',color='black',zorder=1e3,label=label)
     return hist, errors, plot

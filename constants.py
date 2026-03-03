@@ -16,6 +16,10 @@ signal_labels = [r"CC $\nu_e$",
 # default colors used for plotting 
 signal_colors = ["C0", "C1", "C2", "C3", "darkslateblue", "C4", "C5", "C6","C7"]
 
+generic_dict = {"CCnu":0,"NCnu":1,"nonFV":2,"dirt":3,"cosmic":4}
+generic_labels = [r"CC $\nu$",r"NC $\nu$",r"Non-FV $\nu$",r"Dirt $\nu$","cosmic"]
+generic_colors = ["C3", "darkslateblue", "C5", "C6","C7"]
+
 # dictionary mapping particle to pdg code, used for plotting
 pdg_dict = {
     r"$e$":    {"pdg":11,   "mass":0.000511},
