@@ -3,7 +3,10 @@ from makedf.util import *
 from pyanalib.pandas_helpers import *
 
 import numpy as np
+import pandas as pd
 from .utils import ensure_lexsorted
+from .constants import signal_dict, generic_dict
+from .geometry import whereTPC
 
 def InSpill(df,spill_start=0.2, spill_end=2.2):
     return (df.slc.barycenterFM.flashTime > spill_start) & (df.slc.barycenterFM.flashTime < spill_end)
@@ -129,4 +132,140 @@ def select(indf,
     df_dict['opening angle'] = df
 
     return df_dict
+
+def ccnuefilt(df):
+    """Filter for CC nue events based on truth information.
+    
+    Parameters
+    ----------
+    df : pandas.DataFrame
+        DataFrame with truth information (position, iscc, e.genE, pdg columns).
+    
+    Returns
+    -------
+    pandas.Series or numpy.ndarray
+        Boolean mask for CC nue events within TPC.
+    """
+    return whereTPC(df.position) & (df.iscc==1) & (np.isnan(df.e.genE)==False) & (abs(df.pdg)==12)
+
+def remove_ccnue(indf):
+    """Remove CC nue events from DataFrame.
+    
+    Parameters
+    ----------
+    indf : pandas.DataFrame
+        Input DataFrame with MultiIndex columns containing truth information.
+    
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with CC nue events removed.
+    """
+    df = indf.copy()
+    bnb_nuecc_idx = df[ccnuefilt(df.slc.truth)].reset_index()[[('__ntuple', '', '', '', '', ''),('entry', '', '', '', '', '')]].drop_duplicates()
+
+    indexes = df.index.names
+    df = multicol_merge(bnb_nuecc_idx,
+                        df.reset_index(),
+                        left_on=[('__ntuple', '', '', '', '', ''),('entry', '', '', '', '', '')],
+                        right_on=[('__ntuple', '', '', '', '', ''),('entry', '', '', '', '', '')],
+                        how='outer',indicator=True).set_index(indexes)
+    print("% of slices dropped: ", np.round(len(df[df._merge =='both'])/len(df)*100,2)) 
+    df = df[df._merge == 'right_only']
+    df = ensure_lexsorted(df,axis=0)
+    df = ensure_lexsorted(df,axis=1)
+    df = df.drop(columns=['_merge'])
+    return df
+
+def define_signal(indf: pd.DataFrame, prefix=None):
+    """Define signal/background categories for neutrino interactions.
+    
+    Categorizes events into signal (CC nue) and various background categories
+    based on truth information and fiducial volume.
+    
+    Parameters
+    ----------
+    indf : pandas.DataFrame
+        Input DataFrame with MultiIndex columns containing truth information.
+    prefix : str or tuple, optional
+        Column prefix to access truth information. If None, uses top-level columns.
+    
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with added 'signal' column indicating event category using signal_dict.
+    """
+    # sort by row 
+    indf = ensure_lexsorted(indf,0)
+    # sort by column make copy to preserve column ordering of original
+    nudf = ensure_lexsorted(indf.copy(),1)
+
+    if prefix==None: mcdf = nudf
+    else: mcdf = nudf[prefix]
+
+    whereFV = InFV(df=mcdf.position, inzback=0, det="SBND") & InRealisticFV(df=mcdf.position)
+    whereAV = InAV(df=mcdf.position)
+    whereCCnue = ((mcdf.iscc==1)  # require CC interaction
+                & (abs(mcdf.pdg)==12)  # require neutrino to be a nue
+                & (abs(mcdf.e.pdg)==11) # require electron to be the primary (?) 
+                & (mcdf.e.genE > 0.5) # require primary electron to deposit ___ MeV
+                )
+
+    if "signal" not in nudf.columns: nudf["signal"] = -1    
+    # background
+    nudf["signal"] = np.where(whereFV & (mcdf.iscc==1) & (abs(mcdf.pdg)==14) & (mcdf.npi0>0), signal_dict["numuCCpi0"], nudf["signal"]) # numu cc FV
+    nudf["signal"] = np.where(whereFV & (mcdf.iscc==0) & (mcdf.npi0 > 0), signal_dict["NCpi0"], nudf["signal"]) # nc pi0 FV
+    nudf["signal"] = np.where(whereFV & (mcdf.iscc==1) & (abs(mcdf.pdg)==12), signal_dict["othernueCC"], nudf["signal"]) # nue cc FV
+    nudf["signal"] = np.where(whereFV & (mcdf.iscc==1) & (abs(mcdf.pdg)==14) & (mcdf.npi0 == 0), signal_dict["othernumuCC"], nudf["signal"]) # numu cc other FV
+    nudf["signal"] = np.where(whereFV & (mcdf.iscc==0) & (mcdf.npi0 == 0), signal_dict["otherNC"], nudf["signal"]) # nc other FV
+    nudf["signal"] = np.where(whereAV & (nudf["signal"]<0), signal_dict["nonFV"], nudf['signal']) # nonFV
+    nudf["signal"] = np.where(whereAV == False, signal_dict["dirt"], nudf["signal"]) # dirt
+    nudf["signal"] = np.where(np.isnan(mcdf.E), signal_dict['cosmic'], nudf["signal"])
+    
+    nudf["signal"] = np.where(whereFV & whereCCnue, signal_dict["nueCC"], nudf["signal"])
+    if ((nudf.signal < 0) | (nudf.signal >= len(signal_dict))).any(): 
+        print("Warning: unidentified signal/bacgkr channels present.")
+    indf["signal"] = nudf["signal"]
+    return indf
+
+def define_generic(indf: pd.DataFrame, prefix=None):
+    """Define generic signal/background categories for neutrino interactions.
+    
+    Categorizes events into broad categories: CC nu, NC nu, non-FV, dirt, cosmic.
+    
+    Parameters
+    ----------
+    indf : pandas.DataFrame
+        Input DataFrame with MultiIndex columns containing truth information.
+    prefix : str or tuple, optional
+        Column prefix to access truth information. If None, uses top-level columns.
+    
+    Returns
+    -------
+    pandas.DataFrame
+        DataFrame with added 'signal' column indicating event category using generic_dict.
+    """
+    # sort by row 
+    indf = ensure_lexsorted(indf,0)
+    # sort by column make copy to preserve column ordering of original
+    nudf = ensure_lexsorted(indf.copy(),1)
+
+    if prefix==None: mcdf = nudf
+    else: mcdf = nudf[prefix]
+
+    whereFV = InFV(df=mcdf.position, inzback=0, det="SBND")
+    whereAV = InAV(df=mcdf.position)
+    
+    if "signal" not in nudf.columns: nudf["signal"] = -1    
+    # background
+    nudf["signal"] = np.where(whereAV == False, generic_dict["dirt"], nudf["signal"]) # dirt    
+    nudf["signal"] = np.where(whereAV, generic_dict["nonFV"], nudf['signal']) # nonFV
+    nudf["signal"] = np.where(whereFV & (mcdf.iscc==0), generic_dict["NCnu"], nudf["signal"])
+    nudf["signal"] = np.where(whereFV & (mcdf.iscc==1), generic_dict["CCnu"], nudf["signal"])
+    nudf["signal"] = np.where(np.isnan(mcdf.E), generic_dict['cosmic'], nudf["signal"])
+
+    if ((nudf.signal < 0) | (nudf.signal >= len(generic_dict))).any(): 
+        print("Warning: unidentified signal/bacgkr channels present.")
+    indf["signal"] = nudf["signal"]
+    return indf
 

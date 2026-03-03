@@ -15,7 +15,8 @@ import numpy as np
 import pandas as pd
 import warnings
 from tqdm import tqdm
-from .utils import ensure_lexsorted, get_hist1d, get_hist2d
+from .utils import ensure_lexsorted
+from .histogram import get_hist1d, get_hist2d
 from .selection import select
 
 def is_xsec_rate(col, xsec, sigdf, var_true, var_sig):
