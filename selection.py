@@ -6,42 +6,13 @@ import numpy as np
 import pandas as pd
 from .utils import ensure_lexsorted
 from .constants import signal_dict, generic_dict
-from .geometry import whereTPC
+from .geometry import whereTPC, InRealisticFV
 
 def InSpill(df,spill_start=0.2, spill_end=2.2):
     return (df.slc.barycenterFM.flashTime > spill_start) & (df.slc.barycenterFM.flashTime < spill_end)
 
 def InScore(df,score_cut=0.02):
     return (df.slc.barycenterFM.score > score_cut)
-
-def InRealisticFV(df):
-    """
-    Filter events based on realistic fiducial volume criteria.
-
-    This function applies spatial cuts to determine if events fall within the realistic
-    fiducial volume of the detector based on z and y coordinates.
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        DataFrame containing event data with 'z' and 'y' coordinate columns.
-
-    Returns
-    -------
-    pandas.Series or numpy.ndarray
-        Boolean mask where True indicates the event is within the realistic fiducial volume.
-        The condition is satisfied when either:
-        - z >= 250 cm AND y < 100 cm, OR
-        - z < 250 cm
-
-    Notes
-    -----
-    The realistic fiducial volume is defined by the logical OR of two conditions:
-    1. Events with z-coordinate >= 250 cm must have y-coordinate < 100 cm
-    2. All events with z-coordinate < 250 cm are included regardless of y-coordinate
-    """
-
-    return (((df.z >= 250) & (df.y < 100)) | (df.z < 250))
 
 def select(indf, 
            spring=False,
