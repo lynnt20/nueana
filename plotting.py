@@ -115,6 +115,12 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
             this_df = ensure_lexsorted(this_df, axis=1)
             df[ii] = this_df
     
+    weight = False
+    for col in df[0].columns:
+        if "weights_mc" in "".join(list(col)):
+          weight=True
+          break
+    
     colors = generic_colors if generic else signal_colors
     if ax is None: ax = plt.gca()
     ncategories = len(generic_dict) if generic else (len(pdg_dict)+2 if pdg else len(signal_dict))
@@ -137,7 +143,10 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
         for this_df, this_scale in zip(df,scale):
             for i, entry in enumerate(generic_dict):
                 this_signal_val = generic_dict[entry]
-                hist = get_hist1d(data=this_df[this_df.signal==this_signal_val][var],bins=bins, overflow=overflow)
+
+                hist = get_hist1d(data=this_df[this_df.signal==this_signal_val][var],
+                                  weights=this_df[this_df.signal==this_signal_val]['weights_mc'] if weight else None,
+                                  bins=bins, overflow=overflow)
                 stats[:,df_counter] += hist
                 hists[i] = hists[i] + this_scale*hist
             df_counter += 1
@@ -146,7 +155,9 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
         for this_df, this_scale in zip(df,scale):
             for i, entry in enumerate(signal_dict):
                 this_signal_val = signal_dict[entry]
-                hist = get_hist1d(data=this_df[this_df.signal==this_signal_val][var],bins=bins, overflow=overflow)
+                hist = get_hist1d(data=this_df[this_df.signal==this_signal_val][var],
+                                  weights=this_df[this_df.signal==this_signal_val]['weights_mc'] if weight else None,
+                                  bins=bins, overflow=overflow)
                 stats[:,df_counter] += hist
                 hists[i] = hists[i] + this_scale*hist
             df_counter += 1
@@ -162,7 +173,9 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
             for i, key in enumerate(list(pdg_dict.keys())):
                 pdg_value = pdg_dict[key]['pdg']
                 pdg_df = this_nu_df[abs(this_nu_df[pdg_col])==pdg_value].sort_index()
-                hist = get_hist1d(data=pdg_df[var],bins=bins, overflow=overflow)
+                hist = get_hist1d(data=pdg_df[var],
+                                  weights=pdg_df['weights_mc'] if weight else None,
+                                  bins=bins, overflow=overflow)
                 stats[:,df_counter] += hist
                 hists[i] = hists[i] + this_scale*hist
                 # remove the "good pdg" from other_df
@@ -176,10 +189,14 @@ def plot_var(df: pd.DataFrame | list[pd.DataFrame],
             this_other = other_df[idx]
             this_cosmic = cosmic_df[idx]
             if len(this_other)!=0: 
-                hist = get_hist1d(data=this_other[var],bins=bins, overflow=overflow)
+                hist = get_hist1d(data=this_other[var],
+                                  weights=this_other['weights_mc'] if weight else None,
+                                  bins=bins, overflow=overflow)
                 hists[-1] = hists[-1] + this_scale*hist
             if len(this_cosmic)!=0: 
-                hist = get_hist1d(data=this_cosmic[var],bins=bins, overflow=overflow)
+                hist = get_hist1d(data=this_cosmic[var],
+                                  weights=this_cosmic['weights_mc'] if weight else None,
+                                  bins=bins, overflow=overflow)
                 hists[-2] = hists[-2] + this_scale*hist 
     
     # ! THIS ASSUMES that the PDG of interest and the signal type of interest are both index 0
