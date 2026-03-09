@@ -29,6 +29,7 @@ def plot_var(df: pd.DataFrame,
              ylabel: str = "",
              title: str = "",
              counts: bool = False,
+             percents: bool = False,
              scale: float = 1.0,
              normalize: bool = False,
              mult_factor: float = 1.0,
@@ -39,7 +40,10 @@ def plot_var(df: pd.DataFrame,
              pdg_col: tuple | str = 'pfp_shw_truth_p_pdg',
              hatch: list[str] | None = None,
              generic: bool = False,
-             overflow: bool = True) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+             overflow: bool = True,
+             legend_kwargs: dict | None = None,
+             
+             ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Plot a variable as stacked histograms for signal categories or PDG types.
 
     This function supports three modes controlled by ``pdg`` and ``generic``:
@@ -95,6 +99,9 @@ def plot_var(df: pd.DataFrame,
         If True (default), values above bins[-1] are clipped to bins[-1] - 1e-10
         to fold overflow into the last bin. If False, uses standard numpy histogram
         behavior with no clipping.
+    legend_kwargs : dict, optional
+        Dictionary of keyword arguments to pass to ax.legend(). These will override
+        the default legend settings (ncol=2, loc='upper right').
     
     Returns
     -------
@@ -141,7 +148,7 @@ def plot_var(df: pd.DataFrame,
         # other_df stores any particles that we don't specify the pdg of
         this_other = df.copy().sort_index()
         this_nu_df = df[df.signal < signal_dict['cosmic']].sort_index()
-        this_cosmic_df = df[df.signal == signal_dict['cosmic']].sort_index()
+        this_cosmic_df = df[df.signal >= signal_dict['cosmic']].sort_index()
         for i, key in enumerate(list(pdg_dict.keys())):
             pdg_value = pdg_dict[key]['pdg']
             pdg_df = this_nu_df[abs(this_nu_df[pdg_col])==pdg_value].sort_index()
@@ -222,17 +229,20 @@ def plot_var(df: pd.DataFrame,
         systs_err = (systs_err / bin_widths) / total_integral
         
     for i in range(ncategories):
-        if pdg: plot_label = (list(pdg_dict.keys())+['cosmic']+['other'])[i]
+        color = colors[i]
+        if pdg: 
+            plot_label = (list(pdg_dict.keys())+['cosmic']+['other'])[i]
+            if plot_label.find('cosmic')==True: color = colors[signal_dict['cosmic']]
         else: plot_label = category_labels[i]
         if (mult_factor!= 1.0) & (i==0): plot_label +=  f" [x{mult_factor}]"
         if counts: plot_label += f" ({int(hist_counts[i]):,})" if hist_counts[i] < 1e6 else f"({hist_counts[i]:.2e}"
-        
+        if percents: plot_label += f" ({hist_counts[i]/np.sum(hist_counts)*100:.1f}%)"
         bottom=steps[i-1] if i>0 else 0
         # steps needs the first entry to be repeated!
         steps[i] = np.insert(hists[i],obj=0,values=hists[i][0]) + bottom; 
         ax.fill_between(bins, bottom, steps[i], step="pre", 
-                         facecolor=mpl.colors.to_rgba(colors[i],alpha) if plot_label.find('cosmic') else mpl.colors.to_rgba(colors[-1],alpha),
-                         edgecolor=mpl.colors.to_rgba(colors[i],1.0)   if plot_label.find('cosmic') else mpl.colors.to_rgba(colors[-1],1.0),
+                         facecolor=mpl.colors.to_rgba(color,alpha),
+                         edgecolor=mpl.colors.to_rgba(color,1.0),  
                          lw=1.5, 
                          hatch=hatch[i],zorder=(ncategories-i),label=plot_label)
     
@@ -278,7 +288,12 @@ def plot_var(df: pd.DataFrame,
     ax.set_xlabel('_'.join(var)) if xlabel == "" else ax.set_xlabel(xlabel)
     ax.set_ylabel("Counts")      if ylabel == "" else ax.set_ylabel(ylabel)
     ax.set_title ('_'.join(var)) if title  == "" else ax.set_title (title)
-    ax.legend(ncol=2,loc='upper right')
+    
+    # Apply legend with custom kwargs
+    default_legend_kwargs = {'ncol': 2, 'loc': 'upper right'}
+    if legend_kwargs:
+        default_legend_kwargs.update(legend_kwargs)
+    ax.legend(**default_legend_kwargs)
 
     return bins, steps, total_err, syst_dict
 
@@ -353,7 +368,7 @@ def data_plot_overlay(df: pd.DataFrame,
     plot = ax.errorbar(bin_centers, hist, yerr=errors, fmt='.',color='black',zorder=1e3,label=label)
     return hist, errors, plot
 
-def plot_mc_data(mc_dfs: pd.DataFrame,
+def plot_mc_data(mc_df: pd.DataFrame,
                  data_df: pd.DataFrame,
                  var: str | tuple,
                  bins: list[float] | np.ndarray,
@@ -367,7 +382,7 @@ def plot_mc_data(mc_dfs: pd.DataFrame,
 
     Parameters
     ----------
-    mc_dfs : pandas.DataFrame
+    mc_df : pandas.DataFrame
         MC dataframe to be stacked.
     data_df : pandas.DataFrame
         Dataframe containing observed data to overlay as points with errors.
@@ -398,7 +413,7 @@ def plot_mc_data(mc_dfs: pd.DataFrame,
     ax_sub = fig.add_subplot(gs[1])
 
     data_args = dict(df=data_df, var=var, bins=bins, ax=ax_main, normalize=kwargs.get('normalize', False), overflow=kwargs.get('overflow',True))
-    mc_args   = dict(df=mc_dfs, var=var, bins=bins, ax=ax_main, **kwargs)
+    mc_args   = dict(df=mc_df, var=var, bins=bins, ax=ax_main, **kwargs)
 
     data_hist, data_err, data_plot = data_plot_overlay(**data_args)
     mc_bins, mc_steps, mc_err, mc_dict = plot_var(**mc_args)
@@ -421,18 +436,8 @@ def plot_mc_data(mc_dfs: pd.DataFrame,
         ps_err = 1 + np.append(mc_contribution[0],mc_contribution)
         ms_err = 1 - np.append(mc_contribution[0],mc_contribution)
         
-        # sum_ratio = np.sum(data_hist)/np.sum(mc_tot)
-        # sum_syst_err = np.sqrt(np.sum(mc_err**2)) / np.sum(mc_tot)
-        # sum_stat_err = np.sqrt(np.sum(data_err**2)) / np.sum(mc_tot)
-        
-        # chisq = np.sum((data_hist - mc_tot)**2/mc_tot)
-        
     bin_centers = 0.5 * (mc_bins[1:] + mc_bins[:-1])
     nbins = len(bins)-1
-    
-    # ax_main.annotate(r"$\chi^2/$dof"+f"={chisq:.1f}/{int(nbins)}",xycoords='axes fraction',xy=(0.025,0.925))
-    # ax_main.annotate(r"$\Sigma$data/$\Sigma$MC"+f"={sum_ratio:.2f}"+r"$\pm$"+f"{sum_syst_err:.2f}(sys.)"+r"$\pm$"+f"{sum_stat_err:.2f}(stat.)" ,
-    #                  xycoords='axes fraction',xy=(0.025,0.85))
     
     ax_sub.errorbar(bin_centers, ratio, yerr=ratio_err, fmt='s', markersize=3,color='black', zorder=1e3, label='data/MC ratio')
     # fill_between needs last entry to be repeated 
