@@ -110,10 +110,15 @@ def select(indf,
         return None
 
     shower_var = ("primshw","shw","maxplane_energy") if spring else ("primshw","shw","bestplane_energy")
-
-    # add reco shower energy column for cuts and plotting (scaled by shower_scale to approximate true energy)
+    add_col = True
+    # for col in df.columns:
+    #     if "reco_energy" in "_".join(list(col)):
+    #         add_col = False
+    #         break
+    # if add_col: 
+    #     df = multicol_add(df,((ensure_lexsorted(df,axis=1)[shower_var])*shower_scale).rename(("primshw","shw","reco_energy")))
     df[("primshw","shw","reco_energy",'','','')] = ensure_lexsorted(df,axis=1)[shower_var]*shower_scale
-    # ** these cuts done already in makedf, adding some here to ensure consistency
+    # ** these cuts done already in makedf
     # * require nuscore > 0.5
     # * require not clear cosmic 
     # * require reco vertex in AV
@@ -232,7 +237,6 @@ def define_signal(indf: pd.DataFrame, prefix=None):
         DataFrame with added 'signal' column indicating event category using signal_dict.
     """
     # Keep lexsorted axes for robust multi-index access without forcing a full copy.
-    original_col = indf.columns
     nudf = ensure_lexsorted(ensure_lexsorted(indf, 0), 1)
 
     if prefix is None:
@@ -247,7 +251,12 @@ def define_signal(indf: pd.DataFrame, prefix=None):
                 & (abs(mcdf.e.pdg)==11) # require electron to be the primary (?) 
                 & (mcdf.e.genE > 0.5) # require primary electron to deposit ___ MeV
                 )
-    signal = np.full(len(nudf), -1, dtype=np.int16)
+
+    if "signal" in nudf.columns:
+        signal = nudf["signal"].to_numpy(copy=True)
+    else:
+        signal = np.full(len(nudf), -1, dtype=np.int16)
+
     # background
     signal[whereFV & (mcdf.iscc==1) & (abs(mcdf.pdg)==14) & (mcdf.npi0>0)] = signal_dict["numuCCpi0"] # numu cc FV
     signal[whereFV & (mcdf.iscc==0) & (mcdf.npi0 > 0)] = signal_dict["NCpi0"] # nc pi0 FV
@@ -259,11 +268,9 @@ def define_signal(indf: pd.DataFrame, prefix=None):
     signal[np.isnan(mcdf.E)] = signal_dict['cosmic']
 
     signal[whereFV & whereCCnue] = signal_dict["nueCC"]
-    # preserve original column ordering
-    nudf.columns = original_col
     nudf["signal"] = signal
-    if (signal < 0).any(): 
-        print("Warning: unidentified signal/background channels present.")
+    if ((nudf.signal < 0) | (nudf.signal >= len(signal_dict))).any(): 
+        print("Warning: unidentified signal/bacgkr channels present.")
     return nudf
 
 def define_generic(indf: pd.DataFrame, prefix=None):
