@@ -110,7 +110,7 @@ def calc_matrices_explicit(var_arr,cv):
                 corr[i,j] = cov[i,j] / (np.sqrt ( cov[i,i] )* np.sqrt( cov[j,j] ))
     return cov, cov_frac, corr
 
-def get_evtrate(indf,sigdf,sel_weights,sig_weights, var, var_true, var_sig,bins): 
+def get_evtrate(indf,sigdf,sel_weights,sig_weights,sig_scale,var, var_true, var_sig, bins): 
     """Compute predicted event-rate histograms for cross-section systematic universes.
     
     Parameters
@@ -125,6 +125,8 @@ def get_evtrate(indf,sigdf,sel_weights,sig_weights, var, var_true, var_sig,bins)
         Per-event systematic weights for the selected sample.
     sig_weights : np.ndarray, shape (n_signal, n_universes)
         Per-event systematic weights for the truth-level signal sample.
+    sig_scale : float
+        Overall scale factor to apply to the signal weights.
     var : tuple
         Column key for the reco-level variable to histogram
         (e.g. ``('primshw','shw','reco_energy')``).
@@ -157,7 +159,7 @@ def get_evtrate(indf,sigdf,sel_weights,sig_weights, var, var_true, var_sig,bins)
     sig_hist_univ = np.apply_along_axis(get_hist1d,0,
                                         sig_weights,
                                         sigdf[var_sig],bins)
-    sig_hist_cv = get_hist1d(np.ones(len(sigdf)),
+    sig_hist_cv = get_hist1d(np.ones(len(sigdf))*sig_scale,
                               sigdf[var_sig],
                               bins)
     
@@ -172,158 +174,135 @@ def get_evtrate(indf,sigdf,sel_weights,sig_weights, var, var_true, var_sig,bins)
                                          bins)
     return sig_reco_hists + bkg_reco_hists
 
-def get_syst(indf: pd.DataFrame,
-             var: str | tuple,
-             bins: np.ndarray,
-             scale: bool = True,
-             normalize: bool = False,
-             xsec: bool = False,
-             sigdf: pd.DataFrame = None,
-             var_true: str | tuple = None,
-             var_sig: str | tuple = None) -> dict:
-    """Compute systematic uncertainty histograms and covariance matrices.
-
-    Parameters
-    ----------
-    indf : pd.DataFrame
-        Input DataFrame with MultiIndex columns containing systematic weights.
-    var : str or tuple
-        Column name for the variable to histogram.
-    bins : np.ndarray
-        Bin edges for histogramming.
-    scale : bool, optional
-        If True (default), apply flux-POT normalization from `flux_pot_norm` column.
-    normalize : bool, optional
-        If True, area-normalize each universe histogram to match the CV total counts
-        (shape-only uncertainty). Default is False.
-    xsec : bool, optional
-        If True, compute special event-rate histograms for cross-section systematics using
-        per-universe response matrices. Only applies to GENIE systematics. Default is False.
-    sigdf : pd.DataFrame, optional
-        Truth-level, signal-only DataFrame used for response matrix denominators in xsec
-        calculations. Must be provided if `xsec=True`.
-    var_true : str or tuple, optional
-        Column name for the true-level variable in the selected (reco) DataFrame.
-        Required for xsec calculations (e.g., ``('primshw','shw','truth','p','genE')``).
-    var_sig : str or tuple, optional
-        Column name for the true-level variable in the signal DataFrame.
-        Required for xsec calculations (e.g., ``('e','genE')``).
+def get_syst_hists(indf: pd.DataFrame,
+                   var: str | tuple,
+                   bins: np.ndarray,
+                   scale: bool = True,
+                   normalize: bool = False,
+                   xsec: bool = False,
+                   sigdf: pd.DataFrame = None,
+                   scale_sig: int = 1,
+                   var_true: str | tuple = None,
+                   var_sig: str | tuple = None) -> tuple[dict, np.ndarray]:
+    """Compute only systematic universe histograms (no covariance/correlation matrices).
 
     Returns
     -------
-    dict
-        Dictionary keyed by systematic name, with values containing:
-        - 'hists'    : np.ndarray of shape (nbins, nuniv), histograms per universe
-        - 'cov'      : np.ndarray of shape (nbins, nbins), covariance matrix
-        - 'cov_frac' : np.ndarray of shape (nbins, nbins), fractional covariance
-        - 'corr'     : np.ndarray of shape (nbins, nbins), correlation matrix
-
-    Notes
-    -----
-    - NaN weights are replaced with 1.0 (assumes the systematic doesn't apply to that event; e.g. GENIE on true cosmics).
-    - Unisim knobs produce a single universe.
-    - Multisigma knobs produce 2 universes (ps1, ms1).
-    - Multisim knobs produce N universes.
-    - For xsec=True with GENIE systematics, need special treatment.
+    tuple[dict, np.ndarray]
+        (syst_hist_dict, cv_hist), where:
+        - syst_hist_dict[key]['hists'] has shape (nbins, nuniv)
+        - cv_hist is the flux-normalized CV histogram
     """
-    df = indf.copy()
-    
-    if isinstance(df, pd.DataFrame):
-        df = ensure_lexsorted(df, axis=0)
-        df = ensure_lexsorted(df, axis=1)
+    indf = ensure_lexsorted(indf, axis=0)
+    indf = ensure_lexsorted(indf, axis=1)
 
-    unisim_col = []
-    multisig_col  = [] 
-    multisim_col = []
+    unisim_col, multisig_col, multisim_col = [], [], []
     univ_level = -1
 
-    # find the level that the multisim universes begin 
-    for col in df.columns:
+    for col in indf.columns:
         if "univ" in "".join(list(col)):
-            for i, x in enumerate(col): 
-                if x.startswith('univ'): 
-                    univ_level = i 
+            for i, x in enumerate(col):
+                if str(x).startswith("univ"):
+                    univ_level = i
                     break
             break
 
     scaling = np.ones(indf.shape[0])
-    for col in df.columns:
-        if ("flux_pot_norm" in col) and scale: 
-            scaling = df[col].to_numpy()
-        if 'morph' in col:
+    for col in indf.columns:
+        if ("flux_pot_norm" in col) and scale:
+            scaling = indf[col].values
+        if "morph" in col:
             unisim_col.append(tuple(filter(None, col)))
-        elif 'ps1' in col:
+        elif "ps1" in col:
             multisig_col.append(tuple(filter(None, col)))
         elif "univ" in "".join(list(col)):
-            if col[:univ_level] not in multisim_col: 
-                multisim_col.append(tuple(filter(None, col))[:univ_level])
-    if np.array_equal(scaling,np.ones(indf.shape[0])) and scale:
+            base = tuple(filter(None, col))[:univ_level]
+            if base not in multisim_col:
+                multisim_col.append(base)
+
+    if np.array_equal(scaling, np.ones(indf.shape[0])) and scale:
         print("No flux-averaged POT normalization found; flux normalization will be equal to one.")
 
-    # get cv histogram
-    cv_input = df[var]
-    cv_hist = get_hist1d(data=cv_input,bins=bins,weights=scaling)
-    cv_counts = np.sum(cv_hist)
-
+    cv = get_hist1d(data=indf[var], bins=bins, weights=scaling)
+    cv_counts = np.sum(cv)
+    nbins = len(bins)
     syst_dict = {}
-    nbins = len(bins) 
 
-    for col in unisim_col: 
-        # * for unisim, get straight from `morph`
-        weights = df[col].to_numpy(dtype=np.float64)
+    # unisim
+    for col in tqdm(unisim_col, desc='Running through unisims'):
+        weights = indf[col].values.astype(np.float64)
         weights[np.isnan(weights)] = 1.0
         weights *= scaling
-        
+
         if is_xsec_rate(col, xsec, sigdf, var_true, var_sig):
-            sig_w = sigdf[col[2:]].to_numpy(dtype=np.float64)
-            hists = get_evtrate(df, sigdf, weights.reshape(-1, 1), sig_w.reshape(-1, 1), 
-                               var, var_true, var_sig, bins)
-        else:
-            hists = np.apply_along_axis(get_hist1d, 0, weights, cv_input, bins)
-            hists = np.reshape(hists,(nbins-1,-1))
-        
-        syst_dict[col[2]] = {'hists': hists}
-    for col in multisig_col:
-        # * for multisigma, get two universes, ps1 and ms1
-        ps1_col = col 
-        ms1_col = tuple([x if x!='ps1' else 'ms1' for x in list(col)])
-        weights = np.stack([np.nan_to_num(df[ps1_col].to_numpy(),copy=False,nan=1.0),
-                            np.nan_to_num(df[ms1_col].to_numpy(),copy=False,nan=1.0)],dtype=np.float64).T
-        weights *= scaling[:,np.newaxis]
-        
-        if is_xsec_rate(col, xsec, sigdf, var_true, var_sig):
-            sig_w_ps1 = np.nan_to_num(sigdf[ps1_col[2:]].to_numpy(),copy=False,nan=1.0)
-            sig_w_ms1 = np.nan_to_num(sigdf[ms1_col[2:]].to_numpy(),copy=False,nan=1.0)
-            sig_weights = np.stack([sig_w_ps1, sig_w_ms1], dtype=np.float64).T
-            hists = get_evtrate(df, sigdf, weights, sig_weights, 
-                               var, var_true, var_sig, bins)
-        else:
-            hists = np.apply_along_axis(get_hist1d, 0, weights, cv_input, bins)
-        
-        syst_dict[col[2]] = {'hists': hists}
-    for col in multisim_col:
-        # * for multisim, get all universes automatically
-        weights = df[col].to_numpy(dtype=np.float64)
-        weights[np.isnan(weights)] = 1.0
-        weights *= scaling[:,np.newaxis]
-        
-        if is_xsec_rate(col, xsec, sigdf, var_true, var_sig):
-            sig_weights = sigdf[col[2:]].to_numpy(dtype=np.float64)
-            hists = get_evtrate(df, sigdf, weights, sig_weights, 
+            sig_weights = sigdf[col[2:]].values.astype(np.float64) * scale_sig
+            hists = get_evtrate(indf, sigdf,
+                                weights.reshape(-1, 1),
+                                sig_weights.reshape(-1, 1),
+                                scale_sig,
                                 var, var_true, var_sig, bins)
         else:
-            hists = np.apply_along_axis(get_hist1d, 0, weights, cv_input, bins)
-        
+            hists = np.apply_along_axis(get_hist1d, 0, weights, indf[var], bins).reshape((nbins - 1, -1))
+
         syst_dict[col[2]] = {'hists': hists}
-    for key in syst_dict.keys():
-        hists = syst_dict[key]['hists']
-        if normalize: 
-            syst_dict[key]['hists'] = hists / np.sum(hists,axis=0) * cv_counts
-        cov, frac, corr = calc_matrices(hists,cv_hist)
-        syst_dict[key].update({'cov': cov, 'cov_frac': frac, 'corr': corr})
+
+    # multisig (ps1/ms1 pairs)
+    for col in tqdm(multisig_col, desc='Running through multisig'):
+        ps1_col = col
+        ms1_col = tuple([x if x != "ps1" else "ms1" for x in list(col)])
+
+        ps1 = np.nan_to_num(indf[ps1_col].values.astype(np.float64), copy=False, nan=1.0)
+        ms1 = np.nan_to_num(indf[ms1_col].values.astype(np.float64), copy=False, nan=1.0)
+        weights = np.stack([ps1, ms1]).T * scaling[:, np.newaxis]
+
+        if is_xsec_rate(col, xsec, sigdf, var_true, var_sig):
+            sig_ps1 = np.nan_to_num(sigdf[ps1_col[2:]].values.astype(np.float64), copy=False, nan=1.0)
+            sig_ms1 = np.nan_to_num(sigdf[ms1_col[2:]].values.astype(np.float64), copy=False, nan=1.0)
+            sig_weights = np.stack([sig_ps1, sig_ms1]).T * scale_sig
+            hists = get_evtrate(indf, sigdf, weights, sig_weights, scale_sig, var, var_true, var_sig, bins)
+        else:
+            hists = np.apply_along_axis(get_hist1d, 0, weights, indf[var], bins)
+
+        syst_dict[col[2]] = {'hists': hists}
+
+    # multisim
+    for col in tqdm(multisim_col, desc='Running through multisims'):
+        weights = indf[col].values.astype(np.float64)
+        weights[np.isnan(weights)] = 1.0
+        weights *= scaling[:, np.newaxis]
+
+        if is_xsec_rate(col, xsec, sigdf, var_true, var_sig):
+            sig_weights = sigdf[col[2:]].values.astype(np.float64) * scale_sig
+            hists = get_evtrate(indf, sigdf, weights, sig_weights, scale_sig, var, var_true, var_sig, bins)
+        else:
+            hists = np.apply_along_axis(get_hist1d, 0, weights, indf[var], bins)
+
+        syst_dict[col[2]] = {'hists': hists}
+
+    if normalize:
+        for key in syst_dict:
+            h = syst_dict[key]['hists']
+            hsum = np.sum(h, axis=0)
+            syst_dict[key]['hists'] = np.divide(
+                h, hsum, out=np.zeros_like(h), where=hsum > 0
+            ) * cv_counts
+
+    return syst_dict, cv
+
+
+def get_syst(*args, **kwargs) -> dict:
+    """Backward-compatible API: returns hists + cov/cov_frac/corr per systematic."""
+    syst_dict, cv = get_syst_hists(*args, **kwargs)
+    
+    for key in syst_dict:
+        cov, cov_frac, corr = calc_matrices(syst_dict[key]['hists'], cv)
+        syst_dict[key]['cov'] = cov
+        syst_dict[key]['cov_frac'] = cov_frac
+        syst_dict[key]['corr'] = corr
+
     return syst_dict
 
-def mcstat(indf, nuniv:int=100 , cols: list=['__ntuple','entry','rec.slc..index','run','subrun','evt','df_idx']) -> pd.DataFrame:
+def mcstat(indf, nuniv:int=100 , cols: list=['__ntuple','entry','rec.slc..index','run','subrun','evt','sample']) -> pd.DataFrame:
     """
     Add MC statistical uncertainty universes to the DataFrame.
     This function generates Poisson-fluctuated weights for each event based on unique seeds
@@ -417,7 +396,7 @@ def get_detvar_systs(detvar_dict,stage,var, bins,normalize=False,**kwargs):
     - When ``normalize=True``, each DetVar histogram is area-normalized to match the CV.
     """
     matrices_dict = {}
-    for i, key in enumerate(detvar_dict.keys()): 
+    for i, key in tqdm(enumerate(detvar_dict.keys())): 
         this_dict = detvar_dict[key]
         this_dv   = this_dict['dv_df']
         this_cv   = this_dict['cv_df']
@@ -463,6 +442,24 @@ def get_syst_df(dicts: list, cv_hist: np.ndarray) -> pd.DataFrame:
         DataFrame with columns: key, category, unc, sum, top5
     """
     categories = ["GENIE", "Flux", "MCstat", "DetVar"]
+
+    def classify_detvar_subcategory(detvar_key: str) -> str:
+        """Map detector variation names to analysis subcategories."""
+        key = detvar_key.lower()
+        tokens = key.replace("-", "_").split("_")
+
+        if "wiremod" in key or "wire_mod" in key or "wire" in key:
+            return "WireMod"
+        if "sce" in key or "spacecharge" in key or "space_charge" in key:
+            return "SCE"
+        if "pmt" in key or "opdet" in key or "opdetector" in key or "light" in key:
+            return "PMT"
+        if (
+            any(tag in key for tag in ["ccal", "phi", "alpha", "beta90", "beta_90", "betap90"])
+            or "r" in tokens
+        ):
+            return "calorimetry"
+        return "other"
     
     # Map categories to key extraction logic
     key_extractors = {
@@ -483,10 +480,26 @@ def get_syst_df(dicts: list, cv_hist: np.ndarray) -> pd.DataFrame:
             category = next((cat for cat in categories if cat in key), None)            
             if category is None:
                 print(f"Warning: category not found for key '{key}'")
-                records.append({"key": key, "category": "Other", "unc": unc, 'sum': tot})
+                records.append({
+                    "key": key,
+                    "category": "Other",
+                    "subcategory": "Other",
+                    "unc": unc,
+                    "sum": tot,
+                })
             else:
                 extracted_key = key_extractors[category](key)
-                records.append({"key": extracted_key, "category": category, "unc": unc, 'sum': tot})
+                subcategory = category
+                if category == "DetVar":
+                    subcategory = classify_detvar_subcategory(extracted_key)
+
+                records.append({
+                    "key": extracted_key,
+                    "category": category,
+                    "subcategory": subcategory,
+                    "unc": unc,
+                    "sum": tot,
+                })
     syst_df = pd.DataFrame(records).sort_values(['category','sum'],ascending=[False,False]) 
     syst_df['top5'] = syst_df.groupby('category')['sum'].rank(method='first', ascending=False) <= 5
     return syst_df
