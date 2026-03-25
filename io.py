@@ -42,6 +42,8 @@ def load_dfs(file, keys2load, n_max_concat=10, start_split=0):
         List of key names to load from the file.
     n_max_concat : int, optional
         Maximum number of splits to concatenate (default: 10).
+    start_split : int, optional
+        Starting split index to load from (default: 0).
     
     Returns
     -------
