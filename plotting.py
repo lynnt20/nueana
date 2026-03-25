@@ -21,6 +21,9 @@ from .utils import ensure_lexsorted
 from .syst import *
 from .histogram import *
 
+def annotate_internal(ax):
+    ax.annotate("SBND Internal", xy=(0.0, 1.02), xycoords='axes fraction', ha='left',color='gray',fontweight='bold')
+
 def plot_var(df: pd.DataFrame,
              var: tuple | str,
              bins: np.ndarray,
@@ -82,8 +85,11 @@ def plot_var(df: pd.DataFrame,
         List of x-values at which to draw vertical cut lines.
     plot_err : bool, default True
         If True, draw MC statistical (and optional systematic) error bands.
-    systs : bool, default False
-        if True, calculates and plots systematic uncertainties. 
+    systs : bool | np.ndarray, optional
+        if True, calculates and plots systematic uncertainties stored in the input dataframe. 
+        if given as a numpy array, uses the provided values as total uncertainties 
+        (e.g. from an external calculation) and plots them without attempting to separate stat/syst.
+        if False or None, no error bands are plotted.
     pdg : bool, default False
         When True, split histograms by PDG (uses ``pdg_col``). Otherwise split by signal type.
     pdg_col : tuple | str, default 'pfp_shw_truth_p_pdg'
@@ -130,6 +136,7 @@ def plot_var(df: pd.DataFrame,
     
     hists       = np.zeros((ncategories,len(bins)-1)) # this is for storing the histograms
     steps       = np.zeros((ncategories,len(bins))) # this is for plotting
+    bin_widths  = np.diff(bins)
     
     stats       = np.zeros(len(bins)-1)
     stats_err   = np.zeros(len(bins)-1)
@@ -188,7 +195,7 @@ def plot_var(df: pd.DataFrame,
         systs_arr = systs
         syst_dict = {}
     elif (systs==True) & (found_systs): 
-        syst_dict = get_syst(indf=df,var=var,bins=bins,scale=False)
+        syst_dict = get_syst(reco_df=df,reco_var=var,bins=bins,scale=False)
         total_cov = np.zeros(len(bins)-1)
         for key in syst_dict.keys():
             total_cov += np.diag(syst_dict[key]['cov'])
@@ -216,17 +223,11 @@ def plot_var(df: pd.DataFrame,
     systs_err = systs_arr * scale
 
     if normalize:
-        # Use actual bin widths for proper normalization
-        bin_widths = np.diff(bins)
-        # Normalize each bin by its width, then scale by total integral
-        hists_per_width = hists / bin_widths[np.newaxis, :]
-        total_integral = np.sum(hists_per_width * bin_widths)
-        
-        # Apply normalization
-        hists = hists_per_width / total_integral
+        total_integral = np.sum(hists * bin_widths)
+        hists = hists / total_integral
         if not systs_is_array:
-            stats_err = (stats_err / bin_widths) / total_integral
-        systs_err = (systs_err / bin_widths) / total_integral
+            stats_err = stats_err / total_integral
+        systs_err = systs_err / total_integral
         
     for i in range(ncategories):
         color = colors[i]
@@ -289,6 +290,7 @@ def plot_var(df: pd.DataFrame,
     ax.set_xlabel('_'.join(var)) if xlabel == "" else ax.set_xlabel(xlabel)
     ax.set_ylabel("Counts")      if ylabel == "" else ax.set_ylabel(ylabel)
     ax.set_title ('_'.join(var)) if title  == "" else ax.set_title (title)
+    annotate_internal(ax)
     
     # Apply legend with custom kwargs
     default_legend_kwargs = {'ncol': 2, 'loc': 'upper right'}
@@ -353,18 +355,15 @@ def data_plot_overlay(df: pd.DataFrame,
 
     hist = get_hist1d(data=df[var], bins=bins, overflow=overflow)
     errors = np.sqrt(hist)
+    bin_widths = np.diff(bins)
+
     label = "data" 
     label += f" ({np.sum(hist,dtype=int):,})" if np.sum(hist) < 1e6 else f"({np.sum(hist):.2e})"
     
     if normalize:
-        # Use actual bin widths for proper normalization
-        bin_widths = np.diff(bins)
-        # Normalize by bin width to get density, then by total integral
-        hist_per_width = hist / bin_widths
-        total_integral = np.sum(hist_per_width * bin_widths)
-        
-        hist = hist_per_width / total_integral
-        errors = (errors / bin_widths) / total_integral
+        total_integral = np.sum(hist * bin_widths)
+        hist = hist / total_integral
+        errors = errors / total_integral
     
     bin_centers = 0.5*(bins[1:] + bins[:-1])
     plot = ax.errorbar(bin_centers, hist, yerr=errors, fmt='.',color='black',zorder=1e3,label=label)
@@ -453,7 +452,8 @@ def plot_mc_data(mc_df: pd.DataFrame,
         for cut in cut_val:
             # ax_main.axvline(cut, color='black', linestyle='--', linewidth=2, alpha=0.5, zorder=1e2)
             ax_sub.axvline (cut, color='black', linestyle='--', linewidth=2, alpha=0.5, zorder=1e2)
-    
+    annotate_internal(ax_main)
+
     if savefig!="":
         plt.savefig(savefig,bbox_inches='tight')
     
