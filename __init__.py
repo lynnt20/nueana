@@ -7,6 +7,8 @@ from . import histogram
 from . import plotting
 from . import syst
 from . import selection
+from . import classes
+from . import funcs
 
 from .constants import *
 from .utils import *
@@ -16,6 +18,8 @@ from .histogram import *
 from .plotting import *
 from .syst import *
 from .selection import *
+from .classes import *
+from .funcs import *
 
 # This allows both:
 # import nueana; nueana.cutPreselection(df)
