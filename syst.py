@@ -19,7 +19,7 @@ from .utils import ensure_lexsorted
 from .histogram import get_hist1d, get_hist2d
 from .selection import select
 from .classes import XSecInputs
-
+from .constants import integrated_flux
 
 def _expand_weights(df, col, multisim_nuniv, scalars=None):
         weights = df[col].values.astype(np.float64)
@@ -226,8 +226,6 @@ def get_syst_hists(reco_df: pd.DataFrame,
 
     scaling = np.ones(reco_df.shape[0])
     for col in reco_df.columns:
-        if "Geant4" in "".join(list(col)):
-            continue
         if ("flux_pot_norm" in col) and scale:
             scaling = reco_df[col].values
         if "morph" in col:
@@ -442,7 +440,8 @@ def get_detvar_systs(detvar_dict,var,bins,stage=None,normalize=False,**selection
         this_dv   = this_dict['dv_df']
         this_cv   = this_dict['cv_df']
         # this is for flux-normalizing
-        this_norm = this_dict['flux_pot_norm']
+        # re-normalize in case flux calculation has changed
+        this_norm = integrated_flux*(this_dict['pot']/1e6)
         
         # lexsort to avoid performance warning on columns 
         # forward selection kwargs to select function
@@ -482,7 +481,7 @@ def get_syst_df(dicts: list, cv_hist: np.ndarray) -> pd.DataFrame:
     pd.DataFrame
         DataFrame with columns: key, category, unc, sum, top5
     """
-    categories = ["GENIE", "Flux", "MCstat", "DetVar"]
+    categories = ["GENIE", "Flux", "MCstat", "DetVar",'Geant4']
 
     def classify_detvar_subcategory(detvar_key: str) -> str:
         """Map detector variation names to analysis subcategories."""
@@ -507,7 +506,8 @@ def get_syst_df(dicts: list, cv_hist: np.ndarray) -> pd.DataFrame:
         "GENIE":  lambda key: "_".join(key.split("_")[4:]),  
         "Flux":   lambda key: key.split("_")[0],
         "MCstat": lambda key: key,
-        "DetVar": lambda key: "".join(key.split("_")[1:])
+        "DetVar": lambda key: "".join(key.split("_")[1:]),
+        "Geant4": lambda key: key.split("_")[1],
     }
     
     records = []
