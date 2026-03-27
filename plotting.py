@@ -42,6 +42,7 @@ def plot_var(df: pd.DataFrame,
              pdg: bool = False,
              pdg_col: tuple | str = 'pfp_shw_truth_p_pdg',
              hatch: list[str] | None = None,
+             bin_labels : list[str] | None = None,
              generic: bool = False,
              overflow: bool = True,
              legend_kwargs: dict | None = None,
@@ -130,7 +131,7 @@ def plot_var(df: pd.DataFrame,
     if ax is None: ax = plt.gca()
     category_dict = generic_dict if generic else (pdg_dict if pdg else signal_dict)
     category_labels = generic_labels if generic else signal_labels
-    ncategories = len(generic_dict) if generic else (len(pdg_dict)+2 if pdg else len(signal_dict))
+    ncategories = len(generic_dict) if generic else (len(pdg_dict)+3 if pdg else len(signal_dict))
     if hatch == None: hatch = [""]*ncategories
     alpha = 0.25 if pdg else 0.4
     
@@ -155,7 +156,8 @@ def plot_var(df: pd.DataFrame,
         # other_df stores any particles that we don't specify the pdg of
         this_other = df.copy().sort_index()
         this_nu_df = df[df.signal < signal_dict['cosmic']].sort_index()
-        this_cosmic_df = df[df.signal >= signal_dict['cosmic']].sort_index()
+        this_cosmic_df = df[df.signal == signal_dict['cosmic']].sort_index()
+        this_offbeam_df = df[df.signal == signal_dict['offbeam']].sort_index()
         for i, key in enumerate(list(pdg_dict.keys())):
             pdg_value = pdg_dict[key]['pdg']
             pdg_df = this_nu_df[abs(this_nu_df[pdg_col])==pdg_value].sort_index()
@@ -168,10 +170,15 @@ def plot_var(df: pd.DataFrame,
             hists[-1] = get_hist1d(data=this_other[var],
                                    weights=this_other['weights_mc'] if weight else None,
                                    bins=bins, overflow=overflow)
+        if len(this_offbeam_df) != 0:
+            hists[-2] = get_hist1d(data=this_offbeam_df[var],
+                              weights=this_offbeam_df['weights_mc'] if weight else None,
+                              bins=bins, overflow=overflow)
         if len(this_cosmic_df) != 0:
-            hists[-2] = get_hist1d(data=this_cosmic_df[var],
+            hists[-3] = get_hist1d(data=this_cosmic_df[var],
                               weights=this_cosmic_df['weights_mc'] if weight else None,
                               bins=bins, overflow=overflow)
+        
     
     # ! THIS ASSUMES that the PDG of interest and the signal type of interest are both index 0
     # ! e.g. for nueCC (signal==0), e- is the first entry in the pdg_dict
@@ -232,8 +239,11 @@ def plot_var(df: pd.DataFrame,
     for i in range(ncategories):
         color = colors[i]
         if pdg: 
-            plot_label = (list(pdg_dict.keys())+['cosmic']+['other'])[i]
-            if plot_label.find('cosmic')==True: color = colors[signal_dict['cosmic']]
+            plot_label = (list(pdg_dict.keys())+['cosmic']+['offbeam']+['other'])[i]
+            if 'cosmic' in plot_label: 
+                color = colors[signal_dict['cosmic']]
+            if 'offbeam' in plot_label: 
+                color = colors[signal_dict['offbeam']]
         else: plot_label = category_labels[i]
         if (mult_factor!= 1.0) & (i==0): plot_label +=  f" [x{mult_factor}]"
         if counts: plot_label += f" ({int(hist_counts[i]):,})" if hist_counts[i] < 1e6 else f"({hist_counts[i]:.2e}"
@@ -291,6 +301,10 @@ def plot_var(df: pd.DataFrame,
     ax.set_ylabel("Counts")      if ylabel == "" else ax.set_ylabel(ylabel)
     ax.set_title ('_'.join(var)) if title  == "" else ax.set_title (title)
     annotate_internal(ax)
+    
+    if bin_labels is not None:
+        ax.set_xticks(bins)
+        ax.set_xticklabels(bin_labels)
     
     # Apply legend with custom kwargs
     default_legend_kwargs = {'ncol': 2, 'loc': 'upper right'}
@@ -373,6 +387,7 @@ def plot_mc_data(mc_df: pd.DataFrame,
                  data_df: pd.DataFrame,
                  var: str | tuple,
                  bins: list[float] | np.ndarray,
+                 bin_labels: list[str] | None = None,
                  figsize: tuple[int, int] = (7, 6),
                  ratio_min: float = 0.0,
                  ratio_max: float = 2.0,
@@ -452,6 +467,11 @@ def plot_mc_data(mc_df: pd.DataFrame,
         for cut in cut_val:
             # ax_main.axvline(cut, color='black', linestyle='--', linewidth=2, alpha=0.5, zorder=1e2)
             ax_sub.axvline (cut, color='black', linestyle='--', linewidth=2, alpha=0.5, zorder=1e2)
+    if bin_labels is not None:
+        ax_main.set_xticks(bins)
+        ax_main.set_xticklabels(bin_labels)
+        ax_sub.set_xticks(bins)
+        ax_sub.set_xticklabels(bin_labels)
     annotate_internal(ax_main)
 
     if savefig!="":
