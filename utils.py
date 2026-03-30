@@ -1,7 +1,8 @@
 """Generic DataFrame utilities."""
 import pandas as pd
-import sys; sys.path.append("/exp/sbnd/app/users/lynnt/cafpyana")
 from pyanalib.pandas_helpers import *
+
+from . import config
 
 def ensure_lexsorted(frame, axis):
     """Ensure DataFrame axes are fully lexsorted when using MultiIndex.

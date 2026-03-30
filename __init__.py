@@ -1,3 +1,6 @@
+# Import config first to set up cafpyana in sys.path
+from . import config
+
 # Import all modules
 from . import constants
 from . import utils

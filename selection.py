@@ -1,9 +1,9 @@
-import sys; sys.path.append("/exp/sbnd/app/users/lynnt/cafpyana")
+import numpy as np
+import pandas as pd
+from . import config
 from makedf.util import *
 from pyanalib.pandas_helpers import *
 
-import numpy as np
-import pandas as pd
 from .utils import ensure_lexsorted
 from .constants import signal_dict, generic_dict
 from .geometry import whereTPC

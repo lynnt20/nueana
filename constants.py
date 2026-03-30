@@ -1,6 +1,8 @@
 """Configurations and constants."""
 import seaborn as sns
 import uproot
+from . import config
+
 # dictionary mapping signal to ints. Signal == 0 is assumed to be the desired topology. 
 signal_dict = {"nueCC":0,
                "numuCCpi0":1,
@@ -41,8 +43,7 @@ pdg_dict = {
 }
 
 # flux file, units: /m^2/10^6 POT, 50 MeV bins
-fluxfile = "/exp/sbnd/data/users/lynnt/xsection/flux/sbnd_original_flux.root"
-with uproot.open(fluxfile) as f:
+with uproot.open(config.FLUX_FILE) as f:
     nue_flux = f["flux_sbnd_nue"].to_numpy()
     flux_vals = nue_flux[0]
 integrated_flux = flux_vals.sum()/1e4 # to cm2

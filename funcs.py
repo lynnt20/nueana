@@ -11,6 +11,7 @@ from .histogram import get_hist1d, get_hist2d
 from .syst import *
 from .classes import SystematicsOutput, XSecInputs
 from .constants import integrated_flux, signal_dict
+from . import config
 
 def get_corr_from_cov(cov):
     sigma = np.sqrt(np.diag(cov))
@@ -48,16 +49,30 @@ def _sum_covariances_from_dicts(syst_dicts, n_bins):
 
 
 def _load_detvar_dicts(
-    detvar_file='/exp/sbnd/data/users/lynnt/xsection/samples/MCP2025B_v10_06_00_09/mc/dfs/detvars/detvar_dict_updated.pkl',
-    recomb_file='/exp/sbnd/data/users/lynnt/xsection/samples/MCP2025B_v10_06_00_09/mc/dfs/detvars/recomb_dict_updated2.pkl',
+    detvar_files=None,
 ):
-    with open(detvar_file, 'rb') as f:
-        detvar_dict = pickle.load(f)
-    with open(recomb_file, 'rb') as f:
-        recomb_dict = pickle.load(f)
-    for key, value in recomb_dict.items():
-        detvar_dict[key] = value
-    return detvar_dict
+    """Load and combine detector variation dictionaries from pickle files.
+    
+    Parameters
+    ----------
+    detvar_files : list of str, optional
+        List of paths to detvar dictionary pickle files. If None, uses config.DETVAR_DICT_FILES.
+    
+    Returns
+    -------
+    dict
+        Combined detector variation and recombination dictionary.
+    """
+    if detvar_files is None:
+        detvar_files = config.DETVAR_DICT_FILES
+        
+    combined_dict = {}
+    for detvar_file in detvar_files:
+        with open(detvar_file, 'rb') as f:
+            file_dict = pickle.load(f)
+            combined_dict.update(file_dict)
+    
+    return combined_dict
 
 
 def _block_diag_cov(cov_a, cov_b):
