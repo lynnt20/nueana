@@ -8,7 +8,7 @@ from .utils import ensure_lexsorted
 from .constants import signal_dict, generic_dict
 from .geometry import whereTPC
 
-def InSpill(df,spill_start=0.2, spill_end=2.2):
+def InSpill(df,spill_start=0.335, spill_end=0.335+1.6):
     return (df.slc.barycenterFM.flashTime > spill_start) & (df.slc.barycenterFM.flashTime < spill_end)
 
 def InScore(df,score_cut=0.02):
@@ -16,12 +16,14 @@ def InScore(df,score_cut=0.02):
 
 def select(indf,
            stage = None,
-           savedict = True,
+           savedict = False,
            spring=True,
            realisticFV=True,
-           spill_start=0.2, 
-           spill_end=2.2, 
+           spill_start=0.335, 
+           spill_end=0.335+1.6, 
            score_cut=0.02,
+           nuscore_cut=0.5,
+           pe_cut = 2e3,
            shower_scale=1.17,
            min_shower_energy=0.5,
            max_track_length=200,
@@ -31,9 +33,8 @@ def select(indf,
            max_dedx=2.5,
            min_opening_angle=0.03,
            max_opening_angle=0.15,
-           min_shower_length=50,
-           max_shower_length=200,
-           min_shower_density=5,):
+           min_shower_length=0.1,
+           max_shower_length=200):
     """
     Apply selection cuts to neutrino interaction data.
     
@@ -46,36 +47,46 @@ def select(indf,
         Allowed values are: 'preselection', 'flash matching', 'shower energy',
         'muon rejection', 'conversion gap', 'dEdx', 'opening angle', 'shower length'.
         If None (default), applies all cuts and returns all stages.
+    savedict : bool, optional
+        If False (default), return only the final selected DataFrame (or selected stage).
+        If True, return a dictionary with all saved stages.
+    spring : bool, optional
+        If True (default), use max-plane shower energy for reco-energy definition.
+        If False, use best-plane shower energy.
     realisticFV : bool, optional
         Whether to apply realistic active volume cut (default: True)
     spill_start : float, optional
-        Minimum flash time for beam spill (default: 0.2)
+        Minimum flash time for beam spill (default: 0.335)
     spill_end : float, optional
-        Maximum flash time for beam spill (default: 2.2)
+        Maximum flash time for beam spill (default: 1.935)
     score_cut : float, optional
         Minimum flash matching score (default: 0.02)
+    nuscore_cut : float, optional
+        Minimum neutrino score for preselection (default: 0.5)
+    pe_cut : float, optional
+        Minimum flash photoelectrons for preselection (default: 2000)
     shower_scale : float, optional
-        Scale factor for shower energy, reco->true (default: 1.25)
+        Scale factor for shower energy, reco->true (default: 1.17)
     min_shower_energy : float, optional
         Minimum primary shower energy in GeV (default: 0.5)
     max_track_length : float, optional
         Maximum track length in cm for muon rejection (default: 200)
+    min_conversion_gap : float, optional
+        Minimum conversion gap (default: 0.001)
     max_conversion_gap : float, optional
         Maximum conversion gap (default: 2)
     min_dedx : float, optional
-        Minimum dE/dx on best plane (default: 1)
+        Minimum dE/dx on best plane (default: 1.25)
     max_dedx : float, optional
         Maximum dE/dx on best plane (default: 2.5)
     min_opening_angle : float, optional
         Minimum shower opening angle (default: 0.03)
     max_opening_angle : float, optional
-        Maximum shower opening angle (default: 0.2)
+        Maximum shower opening angle (default: 0.15)
     min_shower_length : float, optional
-        Minimum shower length in cm (default: 50)
+        Minimum shower length in cm (default: 0.1)
     max_shower_length : float, optional
         Maximum shower length in cm (default: 200)
-    min_shower_density : float, optional
-        Minimum shower density (default: 5)
     
     Returns
     -------
@@ -92,9 +103,8 @@ def select(indf,
         'conversion gap',
         'dEdx',
         'opening angle',
-        'shower length',
-        'shower density'
-    ]
+        'shower length'
+        ]
     if stage is not None and stage not in valid_stages:
         raise ValueError(f"Unknown stage '{stage}'. Valid options: {valid_stages}")
 
@@ -119,8 +129,8 @@ def select(indf,
     # * require that there is a primary shower (at least one pfp w/ trackScore < 0.5)
     if realisticFV:
         df = df[(InFV(df.slc.vertex,det="SBND_nohighyz",inzback=0))]
-    df = df[df.slc.barycenterFM.flashPEs > 2e3]
-    df = df[df.slc.nu_score>0.5]
+    df = df[df.slc.barycenterFM.flashPEs > pe_cut]
+    df = df[df.slc.nu_score>nuscore_cut]
     result = save_stage('preselection', df)
     if result is not None: return result
     
@@ -158,19 +168,16 @@ def select(indf,
     result = save_stage('shower length', df)
     if result is not None: return result
 
-    df = df[(df.primshw.shw.density > min_shower_density)]
-    result = save_stage('shower density', df)
-    if result is not None: return result
-    
     return df_dict if savedict else df
 
 def select_sideband(indf, 
                     savedict=False,
                     min_conversion_gap=2,
                     max_conversion_gap=1e3,
+                    max_track_length=1e3,
                     min_dedx=3,
                     max_dedx=6,
-                    min_opening_angle=0.2,
+                    min_opening_angle=0.15,
                     max_opening_angle=1.0,
                     **kwargs):
     """Apply sideband selection cuts with modified default parameters.
@@ -186,12 +193,18 @@ def select_sideband(indf,
         Whether to return dict of all stages (overrides select's default of True)
     min_conversion_gap : float, default 2
         Minimum conversion gap (overrides select's default of 0.001)
+    max_conversion_gap : float, default 1000
+        Maximum conversion gap (overrides select's default of 2)
+    max_track_length : float, default 1000
+        Maximum track length in cm (overrides select's default of 200)
     min_dedx : float, default 3
         Minimum dE/dx on best plane (overrides select's default of 1.25)
     max_dedx : float, default 6
         Maximum dE/dx on best plane (overrides select's default of 2.5)
-    min_opening_angle : float, default 0.2
+    min_opening_angle : float, default 0.15
         Minimum shower opening angle (overrides select's default of 0.03)
+    max_opening_angle : float, default 1.0
+        Maximum shower opening angle (overrides select's default of 0.15)
     **kwargs
         All other parameters are passed to select() and will use its defaults
         unless explicitly specified here.
@@ -203,6 +216,7 @@ def select_sideband(indf,
     """
     df = select(indf,
                 savedict=savedict,
+                max_track_length=max_track_length,
                 min_conversion_gap=min_conversion_gap,
                 max_conversion_gap=max_conversion_gap,
                 min_dedx=min_dedx,
