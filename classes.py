@@ -6,62 +6,53 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
-# class VariableConfig:
-#     """
-#     A configurable class for setting up unfolding variable configurations.
-#     Choose a configuration using one of the provided class methods,
-#     or instantiate directly with custom parameters.
-#     """
+class VariableConfig:
+    """
+    A configurable class for setting up unfolding variable configurations.
+    Choose a configuration using one of the provided class methods,
+    or instantiate directly with custom parameters.
+    """
+    def __init__(self, var_save_name, var_plot_name, var_unit, bins, bin_labels, var_evt_reco_col, var_evt_truth_col, var_nu_col):
+        self.var_save_name = var_save_name
+        self.var_plot_name = var_plot_name
+        self.var_unit = var_unit
+        unit_suffix = f"~[{var_unit}]" if len(var_unit) > 0 else ""
+        self.var_labels = [r"$\mathrm{" + var_plot_name + unit_suffix + "}$", 
+                           r"$\mathrm{" + var_plot_name + "^{reco.}" + unit_suffix + "}$", 
+                           r"$\mathrm{" + var_plot_name + "^{true}" + unit_suffix + "}$"]
+        self.bins = bins
+        self.bin_centers = (bins[:-1] + bins[1:]) / 2.
+        self.bin_labels = bin_labels
+        self.var_evt_reco_col = var_evt_reco_col
+        self.var_evt_truth_col = var_evt_truth_col
+        self.var_nu_col = var_nu_col
 
-#     def __init__(
-#         self,
-#         var_save_name: str,
-#         var_plot_name: str,
-#         var_unit: str,
-#         bins: np.ndarray,
-#         reco_var_reco: str | tuple,
-#         reco_var_true: str | tuple,
-#         true_var_true: str | tuple,
-#     ):
-#         self.var_save_name = var_save_name
-#         self.var_plot_name = var_plot_name
-#         self.var_unit = var_unit
-#         unit_suffix = f"~[{var_unit}]" if len(var_unit) > 0 else ""
-#         self.var_labels = [
-#             r"$\mathrm{" + var_plot_name + unit_suffix + "}$",
-#             r"$\mathrm{" + var_plot_name + "^{reco.}" + unit_suffix + "}$",
-#             r"$\mathrm{" + var_plot_name + "^{true}" + unit_suffix + "}$",
-#         ]
-#         self.bins = bins
-#         self.bin_centers = (bins[:-1] + bins[1:]) / 2.0
-#         self.reco_var_reco = reco_var_reco
-#         self.reco_var_true = reco_var_true
-#         self.true_var_true = true_var_true
 
-#     @classmethod
-#     def electron_energy(cls) -> "VariableConfig":
-#         return cls(
-#             var_save_name="electron-E",
-#             var_plot_name=r"E_e",
-#             var_unit="GeV",
-#             bins=np.linspace(0.15, 1.2, 11),
-#             reco_var_reco=('primshw','shw','reco_energy','','',''),
-#             reco_var_true=('slc','truth','e','genE','',''),
-#             true_var_true=("e", "genE", ""),
-#         )
+    @classmethod
+    def electron_energy(cls):
+        return cls(
+            var_save_name="energy",
+            var_plot_name="E_{e-}",
+            var_unit="GeV",
+            bins=np.array([0.5,0.7,0.95,1.25,1.7,2.5]),
+            bin_labels =  np.array([0.5, 0.7, 0.95, 1.25, 1.7, 5]),
+            var_evt_reco_col=('primshw', 'shw', 'reco_energy'),
+            var_evt_truth_col=('slc','truth','e','genE'),
+            var_nu_col=('e','genE'),
+        )
 
-#     @classmethod
-#     def from_dict(cls, d: dict) -> "VariableConfig":
-#         """Instantiate from a plain dictionary, e.g. loaded from a config file."""
-#         return cls(
-#             var_save_name=d["save_name"],
-#             var_plot_name=d["plot_name"],
-#             var_unit=d["unit"],
-#             bins=np.array(d["bins"]),
-#             reco_var_reco=d["reco_col"],
-#             reco_var_true=d["truth_col"],
-#             true_var_true=d["nu_col"],
-#         )
+    @classmethod
+    def electron_direction(cls):
+        return cls(
+            var_save_name="direction",
+            var_plot_name="\\cos\\theta_{e-}",
+            var_unit="",
+            bins= np.array([0.5,0.6,0.75,0.85,0.925,1.0]),
+            bin_labels =  np.array([0.0  , 0.6  , 0.75 , 0.85 , 0.925, 1.   ]),
+            var_evt_reco_col=('primshw', 'shw', 'dir','z'),
+            var_evt_truth_col=('e','dir','z'),
+            var_nu_col=('e','dir','z')
+        )
 
 @dataclass(frozen=True)
 class XSecInputs:
@@ -98,60 +89,8 @@ class SystematicsOutput:
         return self.xsec_cov is not None
 
 
-# class UnfoldingResult:
-#     """
-#     Ties a VariableConfig, XSecInputs, and SystematicsOutput together
-#     so that variable metadata (bins, labels, column refs) is always
-#     in scope alongside the numerical results.
-#     """
-
-#     def __init__(
-#         self,
-#         variable: VariableConfig,
-#         inputs: XSecInputs,
-#         systematics: SystematicsOutput,
-#     ):
-#         self.variable = variable
-#         self.inputs = inputs
-#         self.systematics = systematics
-
-#     def covariance(
-#         self, mode: Literal["rate", "xsec"] = "rate"
-#     ) -> np.ndarray:
-#         """
-#         Return the covariance matrix for the requested mode.
-
-#         Parameters
-#         ----------
-#         mode : {"rate", "xsec"}
-#             "rate" returns the event-rate covariance (always available).
-#             "xsec" returns the cross-section covariance; raises if not computed.
-#         """
-#         if mode == "xsec":
-#             if not self.systematics.has_xsec:
-#                 raise ValueError(
-#                     f"Cross-section covariance not computed for "
-#                     f"'{self.variable.var_save_name}'. "
-#                     "Re-run systematics with xsec=True."
-#                 )
-#             return self.systematics.xsec_cov
-#         return self.systematics.rate_cov
-
-#     def syst_breakdown(
-#         self, mode: Literal["rate", "xsec"] = "rate"
-#     ) -> pd.DataFrame:
-#         """
-#         Return the per-systematic breakdown DataFrame for the requested mode.
-
-#         Parameters
-#         ----------
-#         mode : {"rate", "xsec"}
-#         """
-#         if mode == "xsec":
-#             if not self.systematics.has_xsec:
-#                 raise ValueError(
-#                     f"Cross-section systematics not available for "
-#                     f"'{self.variable.var_save_name}'."
-#                 )
-#             return self.systematics.xsec_syst_df
-#         return self.systematics.rate_syst_df
+__all__ = [
+    'VariableConfig',
+    'XSecInputs',
+    'SystematicsOutput',
+]
