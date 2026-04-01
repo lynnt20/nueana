@@ -42,22 +42,22 @@ def is_xsec(col: tuple, xsec_inputs: XSecInputs | None) -> bool:
     ----------
     col : tuple
         MultiIndex column name.
-    xsec_inputs : XSecInputs or None
-        Cross-section inputs containing truth-level signal dataframe, scaling,
-        and true-variable column mappings.
+    xsec : bool
+        Whether xsec mode is enabled.
+    sigdf : pd.DataFrame or None
+        Truth-level signal DataFrame.
+    var_true : tuple or None
+        True-level variable column in reco DataFrame.
+    var_sig : tuple or None
+        True-level variable column in signal DataFrame.
     
     Returns
     -------
     bool
-        True if column contains "GENIE" and all xsec inputs are provided; False otherwise.
+        True if column contains "GENIE" and all xsec parameters are provided; False otherwise.
     """
-    return (
-        "GENIE" in "".join(list(col))
-        and xsec_inputs is not None
-        and xsec_inputs.true_signal_df is not None
-        and xsec_inputs.reco_var_true is not None
-        and xsec_inputs.true_var_true is not None
-    )
+    return ("GENIE" in "".join(list(col)) and xsec and sigdf is not None 
+            and var_true is not None and var_sig is not None)
 
 def calc_matrices(var_arr: np.ndarray, cv: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -126,28 +126,32 @@ def calc_matrices_explicit(var_arr,cv):
                 corr[i,j] = cov[i,j] / (np.sqrt ( cov[i,i] )* np.sqrt( cov[j,j] ))
     return cov, cov_frac, corr
 
-def get_xsec_hists(reco_df: pd.DataFrame,
-                   xsec_inputs: XSecInputs,
-                   reco_weights: np.ndarray,
-                   true_signal_weights: np.ndarray,
-                   bins: np.ndarray,
-                   reco_var_reco: str | tuple) -> np.ndarray:
+def get_evtrate(indf,sigdf,sel_weights,sig_weights,sig_scale,var, var_true, var_sig, bins): 
     """Compute predicted event-rate histograms for cross-section systematic universes.
     
     Parameters
     ----------
-    reco_df : pd.DataFrame
+    indf : pd.DataFrame
         Selected (reco-level) DataFrame. Must contain a ``signal`` column
         (0 = signal, nonzero = background) and the reco/true variable columns.
-    xsec_inputs : XSecInputs
-        Cross-section inputs with true signal dataframe, scaling, and variable mappings.
-    reco_weights : np.ndarray, shape (n_selected, n_universes)
-        Per-event systematic weights for the reco-level selected sample.
-    true_signal_weights : np.ndarray, shape (n_signal, n_universes)
+    sigdf : pd.DataFrame
+        Truth-level signal DataFrame used for the denominator of the
+        response matrix (generated events).
+    sel_weights : np.ndarray, shape (n_selected, n_universes)
+        Per-event systematic weights for the selected sample.
+    sig_weights : np.ndarray, shape (n_signal, n_universes)
         Per-event systematic weights for the truth-level signal sample.
-    reco_var_reco : tuple
-        Column key for the reco-level variable to histogram from the reco-level DataFrame.
+    sig_scale : float
+        Overall scale factor to apply to the signal weights.
+    var : tuple
+        Column key for the reco-level variable to histogram
         (e.g. ``('primshw','shw','reco_energy')``).
+    var_true : tuple
+        Column key for the true-level variable in the selected DataFrame
+        (e.g. ``('primshw','shw','truth','p','genE')``).
+    var_sig : tuple 
+        Column key for the true-level variable in the signal DataFrame 
+        (e.g. ``(`e`,`genE`)``). 
     bins : np.ndarray
         Bin edges (shared for reco and true axes). Overflow is folded into
         the last bin.
@@ -160,24 +164,19 @@ def get_xsec_hists(reco_df: pd.DataFrame,
         per-universe response matrix and ``bkg_u`` is the weighted
         background histogram.
     """
-    true_signal_df    = xsec_inputs.true_signal_df
-    true_signal_scale = xsec_inputs.true_signal_scale
-    reco_var_true     = xsec_inputs.reco_var_true
-    true_var_true     = xsec_inputs.true_var_true
-
-    true_signal_df = true_signal_df[true_signal_df.signal==0]  # ensure signal-only truth sample
-    signal_mask = reco_df.signal==0
+    sigdf = sigdf[sigdf.signal==0]  # ensure sigdf is signal-only
+    signal_mask = indf.signal==0
     smearing = np.apply_along_axis(get_hist2d,0,
-                                   reco_weights[signal_mask],
-                                   reco_df[signal_mask][reco_var_reco],
-                                   reco_df[signal_mask][reco_var_true],
+                                   sel_weights[signal_mask],
+                                   indf[signal_mask][var],
+                                   indf[signal_mask][var_true],
                                    bins)
 
     sig_hist_univ = np.apply_along_axis(get_hist1d,0,
-                                        true_signal_weights,
-                                        true_signal_df[true_var_true],bins)
-    sig_hist_cv = get_hist1d(np.ones(len(true_signal_df))*true_signal_scale,
-                              true_signal_df[true_var_true],
+                                        sig_weights,
+                                        sigdf[var_sig],bins)
+    sig_hist_cv = get_hist1d(np.ones(len(sigdf))*sig_scale,
+                              sigdf[var_sig],
                               bins)
     
     response = np.divide(smearing,sig_hist_univ,
@@ -186,13 +185,13 @@ def get_xsec_hists(reco_df: pd.DataFrame,
     # response x cv 
     sig_reco_hists = np.einsum('ijk,j->ik', response, sig_hist_cv)
     bkg_reco_hists = np.apply_along_axis(get_hist1d,0,
-                                         reco_weights[~signal_mask],
-                                         reco_df[~signal_mask][reco_var_reco],
+                                         sel_weights[~signal_mask],
+                                         indf[~signal_mask][var],
                                          bins)
     return sig_reco_hists + bkg_reco_hists
 
-def get_syst_hists(reco_df: pd.DataFrame,
-                   reco_var: str | tuple,
+def get_syst_hists(indf: pd.DataFrame,
+                   var: str | tuple,
                    bins: np.ndarray,
                    scale: bool = True,
                    xsec_inputs: XSecInputs | None = None,
@@ -207,13 +206,13 @@ def get_syst_hists(reco_df: pd.DataFrame,
         - syst_hist_dict[key]['hists'] has shape (nbins, nuniv)
         - cv_hist is the flux-normalized CV histogram
     """
-    reco_df = ensure_lexsorted(reco_df, axis=0)
-    reco_df = ensure_lexsorted(reco_df, axis=1)
+    indf = ensure_lexsorted(indf, axis=0)
+    indf = ensure_lexsorted(indf, axis=1)
 
     unisim_col, multisig_col, multisim_col = [], [], []
     univ_level = -1
 
-    for col in reco_df.columns:
+    for col in indf.columns:
         if "univ" in "".join(list(col)):
             for i, x in enumerate(col):
                 if str(x).startswith("univ"):
@@ -221,10 +220,10 @@ def get_syst_hists(reco_df: pd.DataFrame,
                     break
             break
 
-    scaling = np.ones(reco_df.shape[0])
-    for col in reco_df.columns:
+    scaling = np.ones(indf.shape[0])
+    for col in indf.columns:
         if ("flux_pot_norm" in col) and scale:
-            scaling = reco_df[col].values
+            scaling = indf[col].values
         if "morph" in col:
             unisim_col.append(tuple(filter(None, col)))
         elif "ps1" in col:
@@ -234,10 +233,10 @@ def get_syst_hists(reco_df: pd.DataFrame,
             if base not in multisim_col:
                 multisim_col.append(base)
 
-    if np.array_equal(scaling, np.ones(reco_df.shape[0])) and scale:
+    if np.array_equal(scaling, np.ones(indf.shape[0])) and scale:
         print("No flux-averaged POT normalization found; flux normalization will be equal to one.")
 
-    cv = get_hist1d(data=reco_df[reco_var], bins=bins, weights=scaling)
+    cv = get_hist1d(data=indf[var], bins=bins, weights=scaling)
     cv_counts = np.sum(cv)
     nbins = len(bins)
     syst_dict = {}
@@ -304,19 +303,20 @@ def get_syst_hists(reco_df: pd.DataFrame,
 
     # multisim
     for col in tqdm(multisim_col, desc='Running through multisims'):
-        weights = reco_df[col].values.astype(np.float64)
+        weights = indf[col].values.astype(np.float64)
         weights[np.isnan(weights)] = 1.0
         weights *= scaling[:, np.newaxis]
 
-        if is_xsec(col, xsec_inputs):
-            true_signal_weights = xsec_inputs.true_signal_df[col[2:]].values.astype(np.float64) * xsec_inputs.true_signal_scale
-            hists = get_xsec_hists(reco_df, xsec_inputs, weights, true_signal_weights, bins, reco_var)
+        if is_xsec_rate(col, xsec, sigdf, var_true, var_sig):
+            sig_weights = sigdf[col[2:]].values.astype(np.float64) * scale_sig
+            hists = get_evtrate(indf, sigdf, weights, sig_weights, scale_sig, var, var_true, var_sig, bins)
         else:
-            hists = np.apply_along_axis(get_hist1d, 0, weights, reco_df[reco_var], bins)
+            hists = np.apply_along_axis(get_hist1d, 0, weights, indf[var], bins)
 
         syst_dict[col[2]] = {'hists': hists}
 
     return syst_dict, cv
+
 
 def get_syst(*args, **kwargs) -> dict:
     """Backward-compatible API: returns hists + cov/cov_frac/corr per systematic."""
@@ -391,6 +391,8 @@ def get_detvar_systs(detvar_dict,var,bins,event_type: str | None = "all",**selec
         - 'dv_df': DataFrame or list of DataFrames with detector variations
         - 'cv_df': DataFrame with central value
         - 'flux_pot_norm': Normalization factor
+    stage : str
+        Selection stage to apply (e.g., "opening angle").
     var : str or tuple
         Column name for the variable to histogram.
     bins : np.ndarray
