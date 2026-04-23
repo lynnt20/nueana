@@ -231,63 +231,58 @@ def plot_var(df: pd.DataFrame,
     # storing the sum of each category in case we want to display it
     hist_counts = np.sum(hists,axis=1)
 
-    # check if systematic cols are inside the df
-    found_systs = False
-    if (systs_is_array== False) and (systs==True):
-        for col in df.columns:
-            if "univ_" in "_".join(list(col)):
-                found_systs = True
-                break
-        
-    has_mcstat_in_syst_dict = False
+    # --- Systematics ---
+    # Three cases, resolved before the plot loop:
+    #   2D array  → caller provides the full (stat+syst) covariance; stat is included.
+    #   True      → inherit universe columns from df; detect whether MCstat is present.
+    #   None/else → no systematics; only MC stat error is shown.
+    systs_is_array = isinstance(systs, np.ndarray)
 
     if systs_is_array:
-        # External array input is treated as total covariance and must be 2D.
-        found_systs = True
-        syst_dict = {}
-        if systs.ndim == 2:
-            if systs.shape != (len(bins)-1, len(bins)-1):
-                raise ValueError(
-                    "systs covariance matrix must have shape "
-                    f"({len(bins)-1}, {len(bins)-1}); got {systs.shape}"
-                )
-            total_cov = np.array(systs, dtype=float, copy=True)
-        else:
-            raise ValueError("systs must be a 2D covariance matrix")
+        # Case 2: full covariance supplied by caller — must be exactly 2D.
+        if systs.ndim != 2 or systs.shape != (len(bins)-1, len(bins)-1):
+            raise ValueError(
+                "systs must be a 2D covariance matrix of shape "
+                f"({len(bins)-1}, {len(bins)-1}); got {systs.shape}"
+            )
+        total_cov = np.array(systs, dtype=float, copy=True)
         systs_arr = np.sqrt(np.clip(np.diag(total_cov), a_min=0.0, a_max=None))
-    elif (systs==True) & (found_systs): 
-        syst_dict = get_syst(reco_df=df,reco_var=var,bins=bins,scale=False)
-        has_mcstat_in_syst_dict = any(str(key).lower() == 'mcstat' for key in syst_dict.keys())
-        syst_cov = np.zeros((len(bins)-1, len(bins)-1))
-        for key in syst_dict.keys():
-            syst_cov += syst_dict[key]['cov']
-        total_cov = syst_cov
-        systs_arr = np.sqrt(np.clip(np.diag(total_cov), a_min=0.0, a_max=None))
-    else:
-        if (systs==True) & (found_systs==False):
-            print("can't find universes in the input df, ignoring systematic error bars")
-            systs=False
-        systs_arr = np.zeros(len(bins)-1)
         syst_dict = {}
+        calc_separate_mcstat = False
 
-    # Only calculate statistical error if it is not already included in syst_dict.
-    # For weighted MC, the variance per bin is the sum of w^2; for unweighted
-    # MC, this reduces to the usual Poisson sqrt(N).
-    calc_separate_mcstat = (not systs_is_array) and (not ((systs == True) and found_systs and has_mcstat_in_syst_dict))
-    if calc_separate_mcstat:
-        if weight:
-            stats_var = get_hist1d(data=df[var],
-                                   weights=np.square(df['weights_mc']),
-                                   bins=bins,
-                                   overflow=overflow)
+    elif systs is True:
+        # Case 1: inherit systematics from universe columns in the dataframe.
+        found_systs = any("univ_" in "_".join(list(col)) for col in df.columns)
+        if not found_systs:
+            print("systs=True but no universe columns found; computing stat error only")
+            syst_dict = {}
+            systs_arr = np.zeros(len(bins)-1)
+            calc_separate_mcstat = True
         else:
-            stats_var = get_hist1d(data=df[var],
-                                   bins=bins,
-                                   overflow=overflow)
+            syst_dict = get_syst(reco_df=df, reco_var=var, bins=bins, scale=False)
+            has_mcstat = any(str(k).lower() == 'mcstat' for k in syst_dict)
+            for key in syst_dict:
+                total_cov += syst_dict[key]['cov']
+            systs_arr = np.sqrt(np.clip(np.diag(total_cov), a_min=0.0, a_max=None))
+            calc_separate_mcstat = not has_mcstat
+
+    else:
+        # Case 3: systs=None — no systematics; only MC stat error is shown.
+        syst_dict = {}
+        systs_arr = np.zeros(len(bins)-1)
+        calc_separate_mcstat = True
+
+    # MC stat variance — added when not already folded into the syst covariance.
+    # For weighted MC the per-bin variance is sum(w^2); unweighted reduces to Poisson N.
+    if calc_separate_mcstat:
+        stats_var = get_hist1d(data=df[var],
+                               weights=np.square(df['weights_mc']) if weight else None,
+                               bins=bins, overflow=overflow)
         stats_err = np.sqrt(stats_var) * scale
         total_cov += np.diag(stats_var)
+    else:
+        stats_err = np.zeros(len(bins)-1)
 
-    # Systematic error calculation
     systs_err = systs_arr * scale
     total_cov = total_cov * (scale ** 2)
     if normalize:
@@ -313,42 +308,36 @@ def plot_var(df: pd.DataFrame,
                          lw=1.5, 
                          hatch=hatch[i],zorder=(ncategories-i),label=plot_label)
     
-    if plot_err: 
-        systs_options = {"step":"pre", "color":mpl.colors.to_rgba("gray", alpha=0.75),
-                         "lw":0.0,"facecolor":"none","hatch":"xxx",
-                         "zorder":ncategories+1}
-        
-        # fill_between needs the *first* entry to be repeated...
-        if systs_is_array:
-            # systs array already includes both stat + syst
-            min_total_err = steps[-1] - np.append(systs_err[0], systs_err)
-            pls_total_err = steps[-1] + np.append(systs_err[0], systs_err)
-            ax.fill_between(bins, min_total_err, pls_total_err, **systs_options, label="MC stat.+syst.")
-        elif found_systs and calc_separate_mcstat:
-            # Separate stat and syst bands
-            stats_options = {"step":"pre", "color":mpl.colors.to_rgba("gray", alpha=0.9),
-                             "lw":0.0,"facecolor":"none","hatch":"....",
-                             "zorder":ncategories+1}
-            min_systs_err = steps[-1]     - np.append(systs_err[0],systs_err)
-            pls_systs_err = steps[-1]     + np.append(systs_err[0],systs_err)
-            min_stats_err = min_systs_err - np.append(stats_err[0],stats_err)
-            pls_stats_err = pls_systs_err + np.append(stats_err[0],stats_err)
-            ax.fill_between(bins, min_systs_err, pls_systs_err, **systs_options,label="MC syst.")
-            ax.fill_between(bins, min_systs_err, min_stats_err, **stats_options,label="MC stat.")
-            ax.fill_between(bins, pls_systs_err, pls_stats_err, **stats_options)
-        elif found_systs:
-            # syst_dict already includes MC stat uncertainty; draw the combined band once.
-            min_total_err = steps[-1] - np.append(systs_err[0], systs_err)
-            pls_total_err = steps[-1] + np.append(systs_err[0], systs_err)
-            ax.fill_between(bins, min_total_err, pls_total_err, **systs_options, label="MC stat.+syst.")
-        else: 
-            # Only stat errors
-            stats_options = {"step":"pre", "color":mpl.colors.to_rgba("gray", alpha=0.9),
-                             "lw":0.0,"facecolor":"none","hatch":"....",
-                             "zorder":ncategories+1}
-            min_stats_err = steps[-1] - np.append(stats_err,stats_err[-1])
-            pls_stats_err = steps[-1] + np.append(stats_err,stats_err[-1])
-            ax.fill_between(bins, min_stats_err, pls_stats_err, **stats_options,label="MC stat.")
+    if plot_err:
+        systs_options = {"step": "pre", "color": mpl.colors.to_rgba("gray", alpha=0.75),
+                         "lw": 0.0, "facecolor": "none", "hatch": "xxx",
+                         "zorder": ncategories + 1}
+        stats_options = {"step": "pre", "color": mpl.colors.to_rgba("gray", alpha=0.9),
+                         "lw": 0.0, "facecolor": "none", "hatch": "....",
+                         "zorder": ncategories + 1}
+
+        has_systs = np.any(systs_arr > 0)
+        # fill_between needs the first bin edge repeated
+        _systs = np.append(systs_err[0], systs_err)
+        _stats = np.append(stats_err[0], stats_err)
+
+        if has_systs and not calc_separate_mcstat:
+            # Cases 2 and 1+mcstat: stat is already folded into the covariance → combined band.
+            ax.fill_between(bins,
+                            steps[-1] - _systs, steps[-1] + _systs,
+                            **systs_options, label="MC stat.+syst.")
+        elif has_systs and calc_separate_mcstat:
+            # Case 1 without mcstat: draw syst and stat bands separately.
+            min_syst = steps[-1] - _systs
+            pls_syst = steps[-1] + _systs
+            ax.fill_between(bins, min_syst, pls_syst, **systs_options, label="MC syst.")
+            ax.fill_between(bins, min_syst - _stats, min_syst, **stats_options, label="MC stat.")
+            ax.fill_between(bins, pls_syst, pls_syst + _stats, **stats_options)
+        else:
+            # Case 3: no systematics — stat error only.
+            ax.fill_between(bins,
+                            steps[-1] - _stats, steps[-1] + _stats,
+                            **stats_options, label="MC stat.")
 
     cut_line_zorder = ncategories + 2
     if cut_val != None:
@@ -536,35 +525,38 @@ def plot_mc_data(mc_df: pd.DataFrame,
             ax_sub.axvline (cut, color='black', linestyle='--', linewidth=2, alpha=0.5, zorder=1e2)
 
     total_data = np.sum(data_hist)
-    total_mc = np.sum(mc_tot)
-
-    data_cov = np.diag(np.square(data_err))
-    counts_cov = data_cov.copy()
-    if isinstance(mc_total_cov, np.ndarray) and mc_total_cov.shape == (nbins, nbins):
-        counts_cov += mc_total_cov
-        mc_counts_cov = mc_total_cov
-    else:
-        counts_cov += np.diag(np.square(mc_err))
-        mc_counts_cov = np.diag(np.square(mc_err))
-
+    total_mc   = np.sum(mc_tot)
     total_ratio = total_data / total_mc
-    mc_err = np.sqrt(np.sum(mc_counts_cov)) * (total_ratio / total_mc)
-    data_err = np.sqrt(total_data) / total_mc
-    total_ratio_err = np.sqrt(data_err**2 + mc_err**2)
+
+    # MC covariance matrix — full 2D when cases 1/2 were used in plot_var,
+    # diagonal stat-only for case 3.
+    has_full_cov = isinstance(mc_total_cov, np.ndarray) and mc_total_cov.shape == (nbins, nbins)
+    mc_cov = mc_total_cov if has_full_cov else np.diag(np.square(mc_err))
+
+    # Combined covariance for chi-sq: data (Poisson diagonal) + MC.
+    data_cov   = np.diag(np.square(data_err))
+    counts_cov = data_cov + mc_cov
+
+    # Integrated ratio uncertainty.
+    # Cases 1 & 2: propagate full covariance — sigma_mc = sqrt(sum(mc_cov)) * R / total_mc.
+    # Case 3: same formula, but mc_cov is diagonal so sum(mc_cov) = sum of stat variances.
+    total_ratio_mc_err   = np.sqrt(np.sum(mc_cov)) * (total_ratio / total_mc)
+    total_ratio_data_err = np.sqrt(total_data) / total_mc
+    total_ratio_err      = np.sqrt(total_ratio_data_err**2 + total_ratio_mc_err**2)
 
     valid = np.isfinite(data_hist) & np.isfinite(mc_tot)
-    ndf = nbins
-    chi2 = np.nan
+    ndf     = nbins
+    chi2    = np.nan
     p_value = np.nan
     if np.count_nonzero(valid) > 0:
-        delta = data_hist[valid] - mc_tot[valid]
+        delta   = data_hist[valid] - mc_tot[valid]
         cov_sel = counts_cov[np.ix_(valid, valid)]
         try:
             chi2 = float(delta.T @ np.linalg.pinv(cov_sel) @ delta)
             if chi2_dist is not None and np.isfinite(chi2):
                 p_value = float(chi2_dist.sf(chi2, df=ndf))
         except np.linalg.LinAlgError:
-            chi2 = np.nan
+            chi2    = np.nan
             p_value = np.nan
 
     fig.canvas.draw()
