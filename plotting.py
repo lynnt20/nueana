@@ -15,6 +15,7 @@ import matplotlib as mpl
 from matplotlib.gridspec import GridSpec
 import pandas as pd
 import warnings
+from dataclasses import fields as _dc_fields
 try:
     from scipy.stats import chi2 as chi2_dist
 except Exception:
@@ -26,6 +27,7 @@ from .constants import signal_dict, signal_labels, pdg_dict, signal_colors, gene
 from .utils import ensure_lexsorted
 from .syst import get_syst
 from .histogram import get_hist1d
+from .classes import PlottingConfig
 
 def annotate_internal(ax):
     ax.annotate("SBND Internal", xy=(0.0, 1.02), xycoords='axes fraction', ha='left',color='gray',fontweight='bold')
@@ -34,26 +36,8 @@ def plot_var(df: pd.DataFrame,
              var: tuple | str,
              bins: np.ndarray,
              ax = None,
-             xlabel: str = "",
-             ylabel: str = "",
-             title: str = "",
-             counts: bool = False,
-             percents: bool = False,
-             scale: float = 1.0,
-             normalize: bool = False,
-             mult_factor: float = 1.0,
-             cut_val: list[float] | None = None,
-             plot_err: bool = True,
-             systs: bool | np.ndarray = None,
-             pdg: bool = False,
-             pdg_col: tuple | str = 'pfp_shw_truth_p_pdg',
-             mode: bool = False,
-             hatch: list[str] | None = None,
-             bin_labels : list[str] | None = None,
-             generic: bool = False,
-             overflow: bool = True,
-             legend_kwargs: dict | None = None,
-             
+             config: PlottingConfig | None = None,
+             **kwargs,
              ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Plot a variable as stacked histograms for signal categories or PDG types.
 
@@ -124,6 +108,27 @@ def plot_var(df: pd.DataFrame,
         - steps: array of cumulative step values used for plotting (shape (n_categories, len(bins)))
         - total_err: combined stat + syst per bin (length = n_bins)
     """
+    _p = {f.name: getattr(config, f.name) for f in _dc_fields(config)} if config is not None else {}
+    _p.update(kwargs)
+    xlabel        = _p.get('xlabel', '')
+    ylabel        = _p.get('ylabel', '')
+    title         = _p.get('title', '')
+    counts        = _p.get('counts', False)
+    percents      = _p.get('percents', False)
+    scale         = _p.get('scale', 1.0)
+    normalize     = _p.get('normalize', False)
+    mult_factor   = _p.get('mult_factor', 1.0)
+    cut_val       = _p.get('cut_val', None)
+    plot_err      = _p.get('plot_err', True)
+    systs         = _p.get('systs', None)
+    pdg           = _p.get('pdg', False)
+    pdg_col       = _p.get('pdg_col', 'pfp_shw_truth_p_pdg')
+    mode          = _p.get('mode', False)
+    hatch         = _p.get('hatch', None)
+    bin_labels    = _p.get('bin_labels', None)
+    generic       = _p.get('generic', False)
+    overflow      = _p.get('overflow', True)
+    legend_kwargs = _p.get('legend_kwargs', None)
     if isinstance(df, pd.DataFrame):
         df = ensure_lexsorted(df, axis=0)
         df = ensure_lexsorted(df, axis=1)
@@ -472,6 +477,7 @@ def plot_mc_data(mc_df: pd.DataFrame,
                  ratio_max: float = 2.0,
                  annot: bool = True,
                  savefig: str = "",
+                 config: PlottingConfig | None = None,
                  **kwargs) -> tuple[plt.Figure, plt.Axes, plt.Axes]:
     """Create a combined MC stack + data overlay plot with data/MC ratio subplot.
 
@@ -500,13 +506,15 @@ def plot_mc_data(mc_df: pd.DataFrame,
     fig, ax_main, ax_sub
         The created matplotlib Figure and the main and ratio Axes.
     """
+    _p = {f.name: getattr(config, f.name) for f in _dc_fields(config)} if config is not None else {}
+    _p.update(kwargs)
     fig = plt.figure(figsize=figsize)
     gs = GridSpec(2, 1, height_ratios=[6, 1], hspace=0.4)
     ax_main = fig.add_subplot(gs[0])
     ax_sub = fig.add_subplot(gs[1])
 
-    data_args = dict(df=data_df, var=var, bins=bins, ax=ax_main, normalize=kwargs.get('normalize', False), overflow=kwargs.get('overflow',True))
-    mc_args   = dict(df=mc_df, var=var, bins=bins, ax=ax_main, **kwargs)
+    data_args = dict(df=data_df, var=var, bins=bins, ax=ax_main, normalize=_p.get('normalize', False), overflow=_p.get('overflow', True))
+    mc_args   = dict(df=mc_df, var=var, bins=bins, ax=ax_main, config=config, **kwargs)
 
     data_hist, data_err, data_plot = data_plot_overlay(**data_args)
     mc_bins, mc_steps, mc_err, mc_dict = plot_var(**mc_args)
@@ -544,7 +552,7 @@ def plot_mc_data(mc_df: pd.DataFrame,
     ax_sub.set_ylabel("Data/MC")
     ax_sub.legend(loc='upper center', bbox_to_anchor=(0.5, 1.5),
                   ncol=3,fontsize='small',frameon=False)
-    cut_val = kwargs.get('cut_val', None)
+    cut_val = _p.get('cut_val', None)
     if cut_val is not None:
         for cut in cut_val:
             # ax_main.axvline(cut, color='black', linestyle='--', linewidth=2, alpha=0.5, zorder=1e2)
@@ -584,8 +592,8 @@ def plot_mc_data(mc_df: pd.DataFrame,
 
     fig.canvas.draw()
     legend_loc = ""
-    if isinstance(kwargs.get('legend_kwargs'), dict):
-        legend_loc = str(kwargs['legend_kwargs'].get('loc', '')).lower()
+    if isinstance(_p.get('legend_kwargs'), dict):
+        legend_loc = str(_p['legend_kwargs'].get('loc', '')).lower()
 
     anchor_right = False
     if 'right' in legend_loc:

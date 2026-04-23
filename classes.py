@@ -90,8 +90,38 @@ class SystematicsOutput:
         return self.xsec_cov is not None
 
 
+@dataclass
+class PlottingConfig:
+    """Style and display options for plot_var and plot_mc_data.
+
+    Pass an instance as the ``config`` argument to avoid spelling out all
+    parameters inline.  Any keyword argument passed directly to the plotting
+    function overrides the corresponding field here.
+    """
+    xlabel: str = ""
+    ylabel: str = ""
+    title: str = ""
+    counts: bool = False
+    percents: bool = False
+    scale: float = 1.0
+    normalize: bool = False
+    mult_factor: float = 1.0
+    cut_val: list[float] | None = None
+    plot_err: bool = True
+    systs: bool | np.ndarray | None = None
+    pdg: bool = False
+    pdg_col: tuple | str = 'pfp_shw_truth_p_pdg'
+    mode: bool = False
+    hatch: list[str] | None = None
+    bin_labels: list[str] | None = None
+    generic: bool = False
+    overflow: bool = True
+    legend_kwargs: dict | None = None
+
+
 __all__ = [
     'VariableConfig',
     'XSecInputs',
     'SystematicsOutput',
+    'PlottingConfig',
 ]
