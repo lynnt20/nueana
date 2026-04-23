@@ -8,6 +8,8 @@ Conventions
 """
 import numpy as np
 
+__all__ = ['get_hist1d', 'get_hist2d']
+
 def get_hist1d(weights=None, data=None, bins=None, overflow=True, **kwargs): 
     """1D histogram with optional overflow handling.
     

@@ -13,6 +13,18 @@ import numpy as np
 import pandas as pd
 import warnings
 from tqdm import tqdm
+
+__all__ = [
+    'is_xsec',
+    'calc_matrices',
+    'calc_matrices_explicit',
+    'get_xsec_hists',
+    'get_syst_hists',
+    'get_syst',
+    'mcstat',
+    'get_detvar_systs',
+    'get_syst_df',
+]
 from .utils import ensure_lexsorted, apply_event_mask
 from .histogram import get_hist1d, get_hist2d
 from .selection import select, define_signal

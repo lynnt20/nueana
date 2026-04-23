@@ -1,6 +1,16 @@
 import numpy as np
 import pandas as pd
 from dataclasses import replace
+
+__all__ = [
+    'get_corr_from_cov',
+    'get_fractional_covariance',
+    'add_uncertainty',
+    'add_flat_norm_uncertainty',
+    'add_fractional_uncertainty',
+    'get_intime_cov',
+    'get_total_cov',
+]
 import warnings
 import pickle
 from tqdm import tqdm
@@ -8,7 +18,7 @@ from .utils import ensure_lexsorted, apply_event_mask
 from .io import load_dfs
 from .selection import select, select_sideband
 from .histogram import get_hist1d, get_hist2d
-from .syst import *
+from .syst import calc_matrices, get_syst, get_syst_df, get_detvar_systs
 from .classes import SystematicsOutput, XSecInputs
 from .constants import integrated_flux, signal_dict
 from . import config

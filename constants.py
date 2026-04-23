@@ -3,6 +3,14 @@ import seaborn as sns
 import uproot
 from . import config
 
+__all__ = [
+    'signal_dict', 'signal_labels', 'signal_colors',
+    'generic_dict', 'generic_labels', 'generic_colors',
+    'pdg_dict', 'mode_dict', 'mode_colors',
+    'nue_flux', 'flux_vals', 'integrated_flux',
+    'RHO', 'N_A', 'M_AR', 'V_SBND', 'NTARGETS',
+]
+
 # dictionary mapping signal to ints. Signal == 0 is assumed to be the desired topology. 
 signal_dict = {"nueCC":0,
                "numuCCpi0":1,
