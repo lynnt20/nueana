@@ -4,61 +4,66 @@ import uproot
 from . import config
 
 __all__ = [
-    'signal_dict', 'signal_labels', 'signal_colors',
-    'generic_dict', 'generic_labels', 'generic_colors',
-    'pdg_dict', 'mode_dict', 'mode_colors',
+    'signal_categories', 'signal_dict',
+    'generic_categories', 'generic_dict',
+    'pdg_categories', 'pdg_dict',
+    'mode_categories', 'mode_dict',
     'nue_flux', 'flux_vals', 'integrated_flux',
     'RHO', 'N_A', 'M_AR', 'V_SBND', 'NTARGETS',
 ]
 
-# dictionary mapping signal to ints. Signal == 0 is assumed to be the desired topology. 
-signal_dict = {"nueCC":0,
-               "numuCCpi0":1,
-               "NCpi0":2,
-               "othernumuCC":3,
-               "othernueCC": 4,
-               "otherNC":5, 
-               "nonFV":6 ,
-               "dirt":7,
-               "cosmic":8,
-               "offbeam":9}
-
-signal_labels = [r"CC $\nu_e$",
-                 r"CC $\nu_\mu\pi^0$",
-                 r"NC $\nu$$\pi^0$",
-                 r"other CC $\nu_\mu$",
-                 r"other CC $\nu_e$",
-                 r"other NC $\nu$",
-                 r"Non-FV $\nu$",
-                 r"Dirt $\nu$",
-                 "cosmic",
-                 "offbeam"]
-
-# default colors used for plotting 
-signal_colors = ["C0", "C1", "C2", "C3", "darkslateblue", "C4","C6","C5","darkgray","lightgray"]
-
-generic_dict = {"CCnu":0,"NCnu":1,"nonFV":2,"dirt":3,"cosmic":4}
-generic_labels = [r"CC $\nu$",r"NC $\nu$",r"Non-FV $\nu$",r"Dirt $\nu$","cosmic"]
-generic_colors = ["C3", "darkslateblue", "C5", "C6","C7"]
-
-# dictionary mapping particle to pdg code, used for plotting
-pdg_dict = {
-    r"$e$":        {"pdg":11,   },
-    r"$\mu$":      {"pdg":13,   },
-    r"$\gamma$":   {"pdg":22,   },
-    r"$p$":        {"pdg":2212, },
-    r"$\pi^{+/-}$":{"pdg":211,  },
+# Signal == 0 is assumed to be the desired topology.
+# Note: nonFV uses "C6" and dirt uses "C5" — intentionally non-sequential.
+signal_categories = {
+    "nueCC":       {"value": 0, "label": r"CC $\nu_e$",         "color": "C0"},
+    "numuCCpi0":   {"value": 1, "label": r"CC $\nu_\mu\pi^0$",  "color": "C1"},
+    "NCpi0":       {"value": 2, "label": r"NC $\nu$$\pi^0$",    "color": "C2"},
+    "othernumuCC": {"value": 3, "label": r"other CC $\nu_\mu$", "color": "C3"},
+    "othernueCC":  {"value": 4, "label": r"other CC $\nu_e$",   "color": "darkslateblue"},
+    "otherNC":     {"value": 5, "label": r"other NC $\nu$",     "color": "C4"},
+    "nonFV":       {"value": 6, "label": r"Non-FV $\nu$",       "color": "C6"},
+    "dirt":        {"value": 7, "label": r"Dirt $\nu$",         "color": "C5"},
+    "cosmic":      {"value": 8, "label": "cosmic",              "color": "darkgray"},
+    "offbeam":     {"value": 9, "label": "offbeam",             "color": "lightgray"},
 }
+signal_dict = {k: v["value"] for k, v in signal_categories.items()}
 
-mode_dict = {
-    "QE": 0,
-    "RES": 1,
-    "DIS": 2,
-    "COH": 3,
-    "MEC": 10,
+generic_categories = {
+    "CCnu":   {"value": 0, "label": r"CC $\nu$",     "color": "C3"},
+    "NCnu":   {"value": 1, "label": r"NC $\nu$",     "color": "darkslateblue"},
+    "nonFV":  {"value": 2, "label": r"Non-FV $\nu$", "color": "C5"},
+    "dirt":   {"value": 3, "label": r"Dirt $\nu$",   "color": "C6"},
+    "cosmic": {"value": 4, "label": "cosmic",        "color": "C7"},
 }
+generic_dict = {k: v["value"] for k, v in generic_categories.items()}
 
-mode_colors = sns.color_palette("Dark2", n_colors=len(mode_dict)+1)
+# PDG categories for plotting. The 5 named entries use pdg-code filtering; the 4
+# extras (pdg=None) use filter-based population selection. Insertion order matters:
+# named entries must precede extras so that "other_nu" is built from the remainder.
+pdg_categories = {
+    r"$e$":            {"pdg": 11,   "color": "C0"},
+    r"$\mu$":          {"pdg": 13,   "color": "C1"},
+    r"$\gamma$":       {"pdg": 22,   "color": "C2"},
+    r"$p$":            {"pdg": 2212, "color": "C3"},
+    r"$\pi^{+/-}$":    {"pdg": 211,  "color": "darkslateblue"},
+    r"non-$\nu$ $e$":  {"pdg": None, "color": "C4",       "filter": "notprime"},
+    "cosmic":          {"pdg": None, "color": "darkgray",  "filter": "cosmic"},
+    "offbeam":         {"pdg": None, "color": "lightgray", "filter": "offbeam"},
+    "other":           {"pdg": None, "color": "sienna",    "filter": "other_nu"},
+}
+pdg_dict = pdg_categories
+
+_mode_palette = sns.color_palette("Dark2", n_colors=7)
+mode_categories = {
+    "QE":            {"value": 0,    "color": _mode_palette[0]},
+    "RES":           {"value": 1,    "color": _mode_palette[1]},
+    "DIS":           {"value": 2,    "color": _mode_palette[2]},
+    "COH":           {"value": 3,    "color": _mode_palette[3]},
+    "MEC":           {"value": 10,   "color": _mode_palette[4]},
+    r"other $\nu$":  {"value": None, "color": _mode_palette[5], "filter": "other_nu"},
+    r"non $\nu$":    {"value": None, "color": "darkgray",       "filter": "non_nu"},
+}
+mode_dict = {k: v["value"] for k, v in mode_categories.items() if v["value"] is not None}
 
 # flux file, units: /m^2/10^6 POT, 50 MeV bins
 with uproot.open(config.FLUX_FILE) as f:

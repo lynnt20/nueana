@@ -23,7 +23,10 @@ except Exception:
 
 __all__ = ['annotate_internal', 'plot_var', 'plot_var_pdg', 'data_plot_overlay', 'plot_mc_data']
 
-from .constants import signal_dict, signal_labels, pdg_dict, signal_colors, generic_dict, generic_labels, generic_colors, mode_dict, mode_colors
+from .constants import (signal_dict, signal_categories,
+                        generic_dict, generic_categories,
+                        pdg_categories,
+                        mode_dict, mode_categories)
 from .utils import ensure_lexsorted
 from .syst import get_syst
 from .histogram import get_hist1d
@@ -139,29 +142,12 @@ def plot_var(df: pd.DataFrame,
           weight=True
           break
     
-    # colors = generic_colors if generic else signal_colors
     if ax is None: ax = plt.gca()
-    if generic: 
-        category_dict = generic_dict; 
-        category_labels = generic_labels; 
-        ncategories = len(generic_dict)
-        colors = generic_colors
-    elif pdg: 
-        category_dict = pdg_dict; 
-        ncategories = (len(pdg_dict)+4)
-        colors = signal_colors
-    elif mode: 
-        category_dict = mode_dict; 
-        category_labels = list(mode_dict.keys()) + [r'other $\nu$'] + [r'non $\nu$']; 
-        ncategories = len(mode_dict)+2
-        colors = mode_colors + ['darkgray']
-    else: 
-        category_dict = signal_dict; 
-        category_labels = signal_labels
-        ncategories = len(signal_dict)
-        colors = signal_colors
-    
-    # ncategories = len(generic_dict) if generic else (len(pdg_dict)+4 if pdg else len(signal_dict))
+    if generic:   categories = generic_categories
+    elif pdg:     categories = pdg_categories
+    elif mode:    categories = mode_categories
+    else:         categories = signal_categories
+    ncategories = len(categories)
     if hatch == None: hatch = [""]*ncategories
     alpha = 0.25 if pdg else 0.4
     
@@ -178,8 +164,8 @@ def plot_var(df: pd.DataFrame,
     systs_is_array = isinstance(systs, np.ndarray)
 
     if (pdg==False) & (mode==False):
-        for i, entry in enumerate(category_dict):
-            this_cat = category_dict[entry]
+        for i, (key, entry) in enumerate(categories.items()):
+            this_cat = entry["value"]
             hists[i] = get_hist1d(data=df[df.signal==this_cat][var],
                                   weights=df[df.signal==this_cat]['weights_mc'] if weight else None,
                                   bins=bins, overflow=overflow)
@@ -187,18 +173,21 @@ def plot_var(df: pd.DataFrame,
     elif mode:
         this_nu    = df[df.slc.truth.genie_mode == df.slc.truth.genie_mode]
         this_other = df[df.slc.truth.genie_mode != df.slc.truth.genie_mode]
-        for i, entry in enumerate(category_dict):
-            this_cat = category_dict[entry]
-            hists[i] = get_hist1d(data=df[df.slc.truth.genie_mode==this_cat][var],
-                                  weights=df[df.slc.truth.genie_mode==this_cat]['weights_mc'] if weight else None,
-                                  bins=bins, overflow=overflow)
-            this_nu = this_nu[this_nu.slc.truth.genie_mode != this_cat]
-        hists[-2] = get_hist1d(data=this_nu[var],
-                                weights=this_nu['weights_mc'] if weight else None,
-                                bins=bins, overflow=overflow)
-        hists[-1] = get_hist1d(data=this_other[var],
-                                weights=this_other['weights_mc'] if weight else None,
-                                bins=bins, overflow=overflow)
+        for i, (key, entry) in enumerate(categories.items()):
+            if entry["value"] is not None:
+                this_cat = entry["value"]
+                hists[i] = get_hist1d(data=df[df.slc.truth.genie_mode==this_cat][var],
+                                      weights=df[df.slc.truth.genie_mode==this_cat]['weights_mc'] if weight else None,
+                                      bins=bins, overflow=overflow)
+                this_nu = this_nu[this_nu.slc.truth.genie_mode != this_cat]
+            elif entry["filter"] == "other_nu":
+                hists[i] = get_hist1d(data=this_nu[var],
+                                      weights=this_nu['weights_mc'] if weight else None,
+                                      bins=bins, overflow=overflow)
+            elif entry["filter"] == "non_nu":
+                hists[i] = get_hist1d(data=this_other[var],
+                                      weights=this_other['weights_mc'] if weight else None,
+                                      bins=bins, overflow=overflow)
     else:
         process_col = tuple(list(pdg_col)[:-1] + ['start_process']) 
         # other_df stores any particles that we don't specify the pdg of
@@ -207,36 +196,32 @@ def plot_var(df: pd.DataFrame,
         this_offbeam_df = df[df.signal == signal_dict['offbeam']]#.sort_index()
         # really only want to see electrons that are
         # primaries from a FV neutrino interaction
-        where_notprime = ((abs(this_nu_df[pdg_col])==11) & 
+        where_notprim = ((abs(this_nu_df[pdg_col])==11) & 
                           (this_nu_df[process_col] != 0)) 
-        this_notprime_df   = this_nu_df[where_notprime]
-        this_nu_df         = this_nu_df[~where_notprime]
+        this_notprim_df   = this_nu_df[where_notprim]
+        this_nu_df         = this_nu_df[~where_notprim]
         this_other         = this_nu_df.copy()
         
-        for i, key in enumerate(list(pdg_dict.keys())):
-            pdg_value = pdg_dict[key]['pdg']
-            pdg_df = this_nu_df[abs(this_nu_df[pdg_col])==pdg_value].sort_index()
-            hists[i] = get_hist1d(data=pdg_df[var],
-                                  weights=pdg_df['weights_mc'] if weight else None,
-                                  bins=bins, overflow=overflow)
-            # remove the "good pdg" from other_df
-            this_other = this_other[abs(this_other[pdg_col])!=pdg_value]
-        if len(this_other) != 0:
-            hists[-1] = get_hist1d(data=this_other[var],
-                                   weights=this_other['weights_mc'] if weight else None,
-                                   bins=bins, overflow=overflow)
-        if len(this_offbeam_df) != 0:
-            hists[-2] = get_hist1d(data=this_offbeam_df[var],
-                              weights=this_offbeam_df['weights_mc'] if weight else None,
-                              bins=bins, overflow=overflow)
-        if len(this_cosmic_df) != 0:
-            hists[-3] = get_hist1d(data=this_cosmic_df[var],
-                              weights=this_cosmic_df['weights_mc'] if weight else None,
-                              bins=bins, overflow=overflow)
-        if len(this_notprime_df) != 0:
-            hists[-4] = get_hist1d(data=this_notprime_df[var],
-                              weights=this_notprime_df['weights_mc'] if weight else None,
-                              bins=bins, overflow=overflow)
+        _pdg_populations = {
+            "notprim": this_notprim_df,
+            "cosmic":   this_cosmic_df,
+            "offbeam":  this_offbeam_df,
+        }
+        for i, (key, entry) in enumerate(categories.items()):
+            if entry["pdg"] is not None:
+                pdg_value = entry["pdg"]
+                pdg_df = this_nu_df[abs(this_nu_df[pdg_col])==pdg_value].sort_index()
+                hists[i] = get_hist1d(data=pdg_df[var],
+                                      weights=pdg_df['weights_mc'] if weight else None,
+                                      bins=bins, overflow=overflow)
+                this_other = this_other[abs(this_other[pdg_col])!=pdg_value]
+            else:
+                filt = entry["filter"]
+                pop = _pdg_populations.get(filt, this_other if filt == "other_nu" else None)
+                if pop is not None and len(pop) != 0:
+                    hists[i] = get_hist1d(data=pop[var],
+                                          weights=pop['weights_mc'] if weight else None,
+                                          bins=bins, overflow=overflow)
     
     # ! THIS ASSUMES that the PDG of interest and the signal type of interest are both index 0
     # ! e.g. for nueCC (signal==0), e- is the first entry in the pdg_dict
@@ -313,17 +298,9 @@ def plot_var(df: pd.DataFrame,
         systs_err = systs_err / total_integral
         total_cov = total_cov / (total_integral ** 2)
         
-    for i in range(ncategories):
-        color = colors[i]
-        if pdg: 
-            plot_label = (list(pdg_dict.keys())+['non-$\\nu$ $e$']+['cosmic']+['offbeam']+['other'])[i]
-            if 'cosmic' in plot_label: 
-                color = colors[signal_dict['cosmic']]
-            if 'offbeam' in plot_label: 
-                color = colors[signal_dict['offbeam']]
-            if 'other' in plot_label: 
-                color = 'sienna'
-        else: plot_label = category_labels[i]
+    for i, (key, entry) in enumerate(categories.items()):
+        color      = entry["color"]
+        plot_label = entry.get("label", key)
         if (mult_factor!= 1.0) & (i==0): plot_label +=  f" [x{mult_factor}]"
         if counts: plot_label += f" ({int(hist_counts[i]):,})" if hist_counts[i] < 1e6 else f"({hist_counts[i]:.2e}"
         if percents: plot_label += f" ({hist_counts[i]/np.sum(hist_counts)*100:.1f}%)"
