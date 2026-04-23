@@ -1,12 +1,14 @@
-"""Useful plotting helpers for nueana: stacked MC, PDG breakdowns, and data overlays.
+"""Plotting helpers for nueana: stacked MC, PDG/mode breakdowns, and data overlays.
 
-This module provides:
-- plot_var: unified function to plot either signal-type stacks or PDG-type stacks.
-- data_plot_overlay: draw data points with Poisson errors on top of MC stacks.
-- plot_mc_data: convenience function that builds an MC+data figure with ratio subplot.
+Functions
+---------
+plot_var : unified stacked histogram — signal types, PDG, interaction mode, or generic.
+data_plot_overlay : data points with Poisson errors for overlaying on MC stacks.
+plot_mc_data : combined MC+data figure with ratio subplot and chi-sq annotation.
 
-All functions accept both plain and MultiIndex DataFrames (the code will attempt to
-ensure lexsorted axes via ``ensure_lexsorted`` imported from ``.utils``).
+All functions accept plain and MultiIndex DataFrames. Style and display options can
+be bundled into a :class:`~nueana.classes.PlottingConfig` instance and passed as
+``config``; keyword arguments take priority over the config.
 """
 
 import numpy as np
@@ -33,6 +35,7 @@ from .histogram import get_hist1d
 from .classes import PlottingConfig
 
 def annotate_internal(ax):
+    """Stamp 'SBND Internal' in the upper-left corner of *ax*."""
     ax.annotate("SBND Internal", xy=(0.0, 1.02), xycoords='axes fraction', ha='left',color='gray',fontweight='bold')
 
 def plot_var(df: pd.DataFrame,
@@ -42,14 +45,16 @@ def plot_var(df: pd.DataFrame,
              config: PlottingConfig | None = None,
              **kwargs,
              ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Plot a variable as stacked histograms for signal categories or PDG types.
+    """Plot a variable as stacked histograms, selectable by category type.
 
-    This function supports three modes controlled by ``pdg`` and ``generic``:
-    - pdg=False, generic=False (default): stack by interaction type using ``signal_dict``.
-    - pdg=True: stack by particle PDG using ``pdg_dict``; adds 'cosmic' and
-      'other' as the last two categories.
-    - generic=True: stack by broad category using ``generic_dict`` (nuFV, nonFV,
-      dirt, cosmic). Takes precedence over ``pdg`` if both are True.
+    Category mode is controlled by ``generic``, ``pdg``, and ``mode`` (checked in
+    that priority order):
+
+    - default (all False): stack by interaction type (``signal_categories``).
+    - ``pdg=True``: stack by leading-particle PDG code (``pdg_categories``).
+    - ``mode=True``: stack by GENIE interaction mode (``mode_categories``).
+    - ``generic=True``: stack by broad class — CC nu, NC nu, non-FV, dirt, cosmic
+      (``generic_categories``).
 
     Parameters
     ----------
@@ -61,6 +66,9 @@ def plot_var(df: pd.DataFrame,
         Bin edges for the histogram.
     ax : matplotlib.axes.Axes, optional
         Axis to draw on. If None the current axis is used.
+    config : PlottingConfig, optional
+        Style/display options bundled into a dataclass. Keyword arguments take
+        priority over any field set in ``config``.
     xlabel : str, optional
         X axis label. Defaults to the variable name when empty.
     ylabel : str, optional
@@ -69,47 +77,58 @@ def plot_var(df: pd.DataFrame,
         Plot title. Defaults to the variable name when empty.
     counts : bool, default False
         If True, append event counts to legend labels.
+    percents : bool, default False
+        If True, append percentage-of-total to legend labels.
     scale : float, default 1.0
-        Scale factor applied to the histogram.
+        Scale factor applied to all histogram bins (and error arrays).
     normalize : bool, default False
-        If True, normalize histograms so integral equals 1 (uses bin widths from ``bins``).
+        If True, normalize histograms so the integral equals 1 (uses bin widths).
     mult_factor : float, default 1.0
-        Multiplicative factor applied to the first category (index 0). Intended for quick
-        visual scaling only; error propagation is not adjusted at all. 
-    cut_val : list, optional
-        List of x-values at which to draw vertical cut lines.
+        Extra multiplicative factor applied to the first category only. Intended for
+        quick visual scaling; error propagation is not adjusted.
+    cut_val : list of float, optional
+        x-values at which to draw vertical dashed cut lines.
     plot_err : bool, default True
-        If True, draw MC statistical (and optional systematic) error bands.
-    systs : bool | np.ndarray, optional
-        if True, calculates and plots systematic uncertainties stored in the input dataframe.
-        if given as a 2D numpy array, interprets it as the full covariance matrix
-        for the total MC prediction (shape ``(n_bins, n_bins)``).
-        if False or None, no error bands are plotted.
+        If True, draw MC error bands (stat and/or syst).
+    systs : True | np.ndarray | None, default None
+        Controls how uncertainties are computed and displayed:
+
+        - ``True``: read universe columns from ``df`` via :func:`~nueana.syst.get_syst`.
+          If an MCstat universe is present the combined stat+syst band is drawn; otherwise
+          stat and syst bands are drawn separately.
+        - ``np.ndarray``: treat as a pre-computed ``(n_bins, n_bins)`` total covariance
+          matrix (stat already included). A single combined band is drawn.
+        - ``None`` (default): MC stat error only (diagonal, sum-of-weights-squared).
     pdg : bool, default False
-        When True, split histograms by PDG (uses ``pdg_col``). Otherwise split by signal type.
+        Stack by PDG code rather than signal type.
     pdg_col : tuple | str, default 'pfp_shw_truth_p_pdg'
-        Column (or multi-index tuple) containing the PDG code per particle (used when ``pdg``
-        is True).
-    hatch : list, optional
-        Optional hatch patterns per category.
+        Column containing the PDG code per particle (used when ``pdg=True``).
+    mode : bool, default False
+        Stack by GENIE interaction mode.
+    hatch : list of str, optional
+        Hatch pattern per category (must match number of categories).
+    bin_labels : list of str, optional
+        Custom tick labels placed at each bin edge.
     generic : bool, default False
-        When True, stack by broad category (FV neutrino, non-FV, dirt, cosmic) using
-        ``generic_dict`` / ``generic_labels`` / ``generic_colors``. Takes precedence
-        over ``pdg`` if both are True.
-    overflow : bool, optional
-        If True (default), values above bins[-1] are clipped to bins[-1] - 1e-10
-        to fold overflow into the last bin. If False, uses standard numpy histogram
-        behavior with no clipping.
+        Stack by broad category (CC nu, NC nu, non-FV, dirt, cosmic).
+    overflow : bool, default True
+        If True, fold values above ``bins[-1]`` into the last bin.
     legend_kwargs : dict, optional
-        Dictionary of keyword arguments to pass to ax.legend(). These will override
-        the default legend settings (ncol=2, loc='upper right').
-    
+        Forwarded to ``ax.legend()``, overriding the defaults
+        ``{ncol: 2, loc: 'upper right'}``.
+
     Returns
     -------
-    bins, steps, total_err
-        - bins: the input bin edges
-        - steps: array of cumulative step values used for plotting (shape (n_categories, len(bins)))
-        - total_err: combined stat + syst per bin (length = n_bins)
+    bins : np.ndarray
+        The input bin edges (unchanged).
+    steps : np.ndarray, shape (n_categories, len(bins))
+        Cumulative step values per category used for the filled polygons.
+    total_err : np.ndarray, shape (n_bins,)
+        Per-bin total uncertainty (sqrt of diagonal of ``total_cov``).
+    syst_dict : dict
+        Per-systematic covariance matrices keyed by systematic name, plus
+        ``'__total_cov__'`` holding the full ``(n_bins, n_bins)`` combined
+        covariance (stat + syst, scaled).
     """
     _p = {f.name: getattr(config, f.name) for f in _dc_fields(config)} if config is not None else {}
     _p.update(kwargs)
@@ -366,18 +385,10 @@ def plot_var(df: pd.DataFrame,
     return bins, steps, total_err, syst_dict
 
 def plot_var_pdg(**args):
-    """Backward-compatible wrapper for plotting by PDG.
+    """Backward-compatible wrapper: calls :func:`plot_var` with ``pdg=True``.
 
-    Parameters
-    ----------
-    **args : dict
-        All keyword arguments are forwarded to :func:`plot_var`. Key arguments are
-        documented there; this wrapper simply calls ``plot_var(pdg=True, **args)``.
-
-    Returns
-    -------
-    tuple
-        The same (bins, steps, total_err) tuple returned by :func:`plot_var`.
+    All keyword arguments are forwarded unchanged. See :func:`plot_var` for the
+    full parameter list and the 4-tuple return value.
     """
     return plot_var(pdg=True,**args)
 
@@ -392,23 +403,26 @@ def data_plot_overlay(df: pd.DataFrame,
     Parameters
     ----------
     df : pandas.DataFrame
-        Dataframe containing the data to plot. ``var`` must be a column name or
-        a tuple for MultiIndex columns.
+        Dataframe containing the data to plot.
     var : str | tuple
-        Column to histogram.
+        Column name (or multi-index tuple) to histogram.
     bins : array-like
         Bin edges for the histogram.
     ax : matplotlib.axes.Axes, optional
         Axis to draw on. If None the current axis is used.
     normalize : bool, default False
         If True, normalize the histogram by its integral (uses bin widths).
+    overflow : bool, default True
+        If True, fold values above ``bins[-1]`` into the last bin.
 
     Returns
     -------
-    hist, errors, plot
-        - hist: per-bin counts (or normalized values)
-        - errors: per-bin sqrt(hist) (or normalized errors)
-        - plot: the Artist returned by ax.errorbar
+    hist : np.ndarray
+        Per-bin counts (or normalized values).
+    errors : np.ndarray
+        Per-bin Poisson errors (sqrt of raw counts, then rescaled if normalized).
+    plot : matplotlib.Artist
+        The object returned by ``ax.errorbar``.
     """
     if ax is None:
         ax = plt.gca()
@@ -445,32 +459,48 @@ def plot_mc_data(mc_df: pd.DataFrame,
                  savefig: str = "",
                  config: PlottingConfig | None = None,
                  **kwargs) -> tuple[plt.Figure, plt.Axes, plt.Axes]:
-    """Create a combined MC stack + data overlay plot with data/MC ratio subplot.
+    """Create a combined MC stack + data overlay plot with a data/MC ratio subplot.
+
+    Calls :func:`plot_var` for the MC stack and :func:`data_plot_overlay` for the
+    data points, then draws a ratio panel and annotates with the integrated Data/MC
+    ratio and a chi-squared goodness-of-fit test.
 
     Parameters
     ----------
     mc_df : pandas.DataFrame
-        MC dataframe to be stacked.
+        MC dataframe passed to :func:`plot_var`.
     data_df : pandas.DataFrame
-        Dataframe containing observed data to overlay as points with errors.
+        Observed-data dataframe passed to :func:`data_plot_overlay`.
     var : str | tuple
         Column (or multi-index tuple) to histogram.
     bins : array-like
         Bin edges for the histograms.
+    bin_labels : list of str, optional
+        Custom tick labels placed at each bin edge on both axes.
     figsize : tuple, default (7, 6)
-        Figure size.
+        Figure size passed to ``plt.figure``.
     ratio_min, ratio_max : float, default (0.0, 2.0)
-        y-limits for the ratio subplot.
+        y-axis limits for the ratio subplot.
+    annot : bool, default True
+        If True, annotate the main axis with the integrated Data/MC ratio and
+        the chi-squared / p-value.
     savefig : str, optional
-        If provided, path where the figure will be saved (bbox_inches='tight').
+        If non-empty, save the figure to this path with ``bbox_inches='tight'``.
+    config : PlottingConfig, optional
+        Style/display options. Keyword arguments take priority.
     **kwargs
-        All other arguments (scale, pdg, pdg_col, xlabel, ylabel, title, counts, normalize,
-        systs, hatch, etc.) are forwarded to :func:`plot_var`.
+        Forwarded to :func:`plot_var` (e.g. ``scale``, ``pdg``, ``xlabel``,
+        ``systs``, ``hatch``, ``normalize``, ``legend_kwargs``).
 
     Returns
     -------
-    fig, ax_main, ax_sub
-        The created matplotlib Figure and the main and ratio Axes.
+    fig : matplotlib.figure.Figure
+    ax_main : matplotlib.axes.Axes
+        The upper (MC stack + data) axis.
+    ax_sub : matplotlib.axes.Axes
+        The lower (data/MC ratio) axis.
+    mc_dict : dict
+        The syst dict returned by :func:`plot_var`, including ``'__total_cov__'``.
     """
     _p = {f.name: getattr(config, f.name) for f in _dc_fields(config)} if config is not None else {}
     _p.update(kwargs)
@@ -560,32 +590,27 @@ def plot_mc_data(mc_df: pd.DataFrame,
             p_value = np.nan
 
     fig.canvas.draw()
-    legend_loc = ""
-    if isinstance(_p.get('legend_kwargs'), dict):
-        legend_loc = str(_p['legend_kwargs'].get('loc', '')).lower()
+    legend_loc  = str((_p.get('legend_kwargs') or {}).get('loc', '')).lower()
+    main_legend = ax_main.get_legend()
 
-    anchor_right = False
+    if main_legend is not None:
+        renderer   = fig.canvas.get_renderer()
+        legend_box = main_legend.get_window_extent(renderer).transformed(ax_main.transAxes.inverted())
+        ann_fontsize = main_legend.get_texts()[0].get_fontsize() if main_legend.get_texts() else 'small'
+    else:
+        legend_box, ann_fontsize = None, 'small'
+
     if 'right' in legend_loc:
         anchor_right = True
-    elif ('left' in legend_loc) or ('center' in legend_loc):
+    elif 'left' in legend_loc or 'center' in legend_loc:
         anchor_right = False
     else:
-        main_legend = ax_main.get_legend()
-        if main_legend is not None:
-            legend_box = main_legend.get_window_extent(renderer=fig.canvas.get_renderer()).transformed(ax_main.transAxes.inverted())
-            anchor_right = legend_box.x0 > 0.5
+        anchor_right = legend_box is not None and legend_box.x0 > 0.5
 
-    main_legend = ax_main.get_legend()
-    ann_fontsize = 'small'
-    if main_legend is not None:
-        legend_box = main_legend.get_window_extent(renderer=fig.canvas.get_renderer()).transformed(ax_main.transAxes.inverted())
-        ann_x = legend_box.x1 if anchor_right else legend_box.x0
-        ann_y = legend_box.y0
-        if main_legend.get_texts():
-            ann_fontsize = main_legend.get_texts()[0].get_fontsize()
+    if legend_box is not None:
+        ann_x, ann_y = (legend_box.x1 if anchor_right else legend_box.x0), legend_box.y0
     else:
-        ann_x = 0.98 if anchor_right else 0.02
-        ann_y = 0.98
+        ann_x, ann_y = (0.98, 0.98) if anchor_right else (0.02, 0.98)
     ann_ha = 'right' if anchor_right else 'left'
 
     if annot:
