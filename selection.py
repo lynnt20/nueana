@@ -34,7 +34,9 @@ def select(indf,
            min_opening_angle=0.03,
            max_opening_angle=0.15,
            min_shower_length=0.1,
-           max_shower_length=200):
+           max_shower_length=200,
+           min_direction=-1,
+           max_direction=1,):
     """
     Apply selection cuts to neutrino interaction data.
     
@@ -131,6 +133,7 @@ def select(indf,
         df = df[(InFV(df.slc.vertex,det="SBND_nohighyz",inzback=0))]
     df = df[df.slc.barycenterFM.flashPEs > pe_cut]
     df = df[df.slc.nu_score>nuscore_cut]
+    df = df[df.slc.is_clear_cosmic==0]
     result = save_stage('preselection', df)
     if result is not None: return result
     
@@ -141,6 +144,7 @@ def select(indf,
 
     # * require that primary shower > min_shower_energy
     df = df[df.primshw.shw.reco_energy > min_shower_energy]
+    df = df[df.primshw.trackScore >0]
     result = save_stage('shower energy', df)
     if result is not None: return result
 
@@ -167,6 +171,9 @@ def select(indf,
             (df.primshw.shw.len > min_shower_length)]
     result = save_stage('shower length', df)
     if result is not None: return result
+    
+    df = df[(df.primshw.shw.dir.z < max_direction) &
+            (df.primshw.shw.dir.z > min_direction)]
 
     return df_dict if savedict else df
 
