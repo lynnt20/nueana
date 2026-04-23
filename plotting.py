@@ -15,8 +15,12 @@ import matplotlib as mpl
 from matplotlib.gridspec import GridSpec
 import pandas as pd
 import warnings
+try:
+    from scipy.stats import chi2 as chi2_dist
+except Exception:
+    chi2_dist = None
 
-from .constants import signal_dict, signal_labels, pdg_dict, signal_colors, generic_dict, generic_labels, generic_colors
+from .constants import signal_dict, signal_labels, pdg_dict, signal_colors, generic_dict, generic_labels, generic_colors, mode_dict, mode_colors
 from .utils import ensure_lexsorted
 from .syst import *
 from .histogram import *
@@ -41,6 +45,7 @@ def plot_var(df: pd.DataFrame,
              systs: bool | np.ndarray = None,
              pdg: bool = False,
              pdg_col: tuple | str = 'pfp_shw_truth_p_pdg',
+             mode: bool = False,
              hatch: list[str] | None = None,
              bin_labels : list[str] | None = None,
              generic: bool = False,
@@ -87,9 +92,9 @@ def plot_var(df: pd.DataFrame,
     plot_err : bool, default True
         If True, draw MC statistical (and optional systematic) error bands.
     systs : bool | np.ndarray, optional
-        if True, calculates and plots systematic uncertainties stored in the input dataframe. 
-        if given as a numpy array, uses the provided values as total uncertainties 
-        (e.g. from an external calculation) and plots them without attempting to separate stat/syst.
+        if True, calculates and plots systematic uncertainties stored in the input dataframe.
+        if given as a 2D numpy array, interprets it as the full covariance matrix
+        for the total MC prediction (shape ``(n_bins, n_bins)``).
         if False or None, no error bands are plotted.
     pdg : bool, default False
         When True, split histograms by PDG (uses ``pdg_col``). Otherwise split by signal type.
@@ -127,11 +132,29 @@ def plot_var(df: pd.DataFrame,
           weight=True
           break
     
-    colors = generic_colors if generic else signal_colors
+    # colors = generic_colors if generic else signal_colors
     if ax is None: ax = plt.gca()
-    category_dict = generic_dict if generic else (pdg_dict if pdg else signal_dict)
-    category_labels = generic_labels if generic else signal_labels
-    ncategories = len(generic_dict) if generic else (len(pdg_dict)+3 if pdg else len(signal_dict))
+    if generic: 
+        category_dict = generic_dict; 
+        category_labels = generic_labels; 
+        ncategories = len(generic_dict)
+        colors = generic_colors
+    elif pdg: 
+        category_dict = pdg_dict; 
+        ncategories = (len(pdg_dict)+4)
+        colors = signal_colors
+    elif mode: 
+        category_dict = mode_dict; 
+        category_labels = list(mode_dict.keys()) + [r'other $\nu$'] + [r'non $\nu$']; 
+        ncategories = len(mode_dict)+2
+        colors = mode_colors + ['darkgray']
+    else: 
+        category_dict = signal_dict; 
+        category_labels = signal_labels
+        ncategories = len(signal_dict)
+        colors = signal_colors
+    
+    # ncategories = len(generic_dict) if generic else (len(pdg_dict)+4 if pdg else len(signal_dict))
     if hatch == None: hatch = [""]*ncategories
     alpha = 0.25 if pdg else 0.4
     
@@ -142,22 +165,47 @@ def plot_var(df: pd.DataFrame,
     stats       = np.zeros(len(bins)-1)
     stats_err   = np.zeros(len(bins)-1)
     systs_err   = np.zeros(len(bins)-1)
+    total_cov   = np.zeros((len(bins)-1, len(bins)-1))
     
     # Check if systs is provided as array (already includes stats)
     systs_is_array = isinstance(systs, np.ndarray)
 
-    if pdg==False: 
+    if (pdg==False) & (mode==False):
         for i, entry in enumerate(category_dict):
             this_cat = category_dict[entry]
             hists[i] = get_hist1d(data=df[df.signal==this_cat][var],
                                   weights=df[df.signal==this_cat]['weights_mc'] if weight else None,
                                   bins=bins, overflow=overflow)
-    else: 
+            
+    elif mode:
+        this_nu    = df[df.slc.truth.genie_mode == df.slc.truth.genie_mode]
+        this_other = df[df.slc.truth.genie_mode != df.slc.truth.genie_mode]
+        for i, entry in enumerate(category_dict):
+            this_cat = category_dict[entry]
+            hists[i] = get_hist1d(data=df[df.slc.truth.genie_mode==this_cat][var],
+                                  weights=df[df.slc.truth.genie_mode==this_cat]['weights_mc'] if weight else None,
+                                  bins=bins, overflow=overflow)
+            this_nu = this_nu[this_nu.slc.truth.genie_mode != this_cat]
+        hists[-2] = get_hist1d(data=this_nu[var],
+                                weights=this_nu['weights_mc'] if weight else None,
+                                bins=bins, overflow=overflow)
+        hists[-1] = get_hist1d(data=this_other[var],
+                                weights=this_other['weights_mc'] if weight else None,
+                                bins=bins, overflow=overflow)
+    else:
+        process_col = tuple(list(pdg_col)[:-1] + ['start_process']) 
         # other_df stores any particles that we don't specify the pdg of
-        this_other = df.copy().sort_index()
-        this_nu_df = df[df.signal < signal_dict['cosmic']].sort_index()
-        this_cosmic_df = df[df.signal == signal_dict['cosmic']].sort_index()
-        this_offbeam_df = df[df.signal == signal_dict['offbeam']].sort_index()
+        this_nu_df      = df[df.signal <  signal_dict['cosmic']]#.sort_index()
+        this_cosmic_df  = df[df.signal == signal_dict['cosmic']]#.sort_index()
+        this_offbeam_df = df[df.signal == signal_dict['offbeam']]#.sort_index()
+        # really only want to see electrons that are
+        # primaries from a FV neutrino interaction
+        where_notprime = ((abs(this_nu_df[pdg_col])==11) & 
+                          (this_nu_df[process_col] != 0)) 
+        this_notprime_df   = this_nu_df[where_notprime]
+        this_nu_df         = this_nu_df[~where_notprime]
+        this_other         = this_nu_df.copy()
+        
         for i, key in enumerate(list(pdg_dict.keys())):
             pdg_value = pdg_dict[key]['pdg']
             pdg_df = this_nu_df[abs(this_nu_df[pdg_col])==pdg_value].sort_index()
@@ -178,7 +226,10 @@ def plot_var(df: pd.DataFrame,
             hists[-3] = get_hist1d(data=this_cosmic_df[var],
                               weights=this_cosmic_df['weights_mc'] if weight else None,
                               bins=bins, overflow=overflow)
-        
+        if len(this_notprime_df) != 0:
+            hists[-4] = get_hist1d(data=this_notprime_df[var],
+                              weights=this_notprime_df['weights_mc'] if weight else None,
+                              bins=bins, overflow=overflow)
     
     # ! THIS ASSUMES that the PDG of interest and the signal type of interest are both index 0
     # ! e.g. for nueCC (signal==0), e- is the first entry in the pdg_dict
@@ -196,17 +247,30 @@ def plot_var(df: pd.DataFrame,
                 found_systs = True
                 break
         
+    has_mcstat_in_syst_dict = False
+
     if systs_is_array:
-        # systs array already includes statistical uncertainty
+        # External array input is treated as total covariance and must be 2D.
         found_systs = True
-        systs_arr = systs
         syst_dict = {}
+        if systs.ndim == 2:
+            if systs.shape != (len(bins)-1, len(bins)-1):
+                raise ValueError(
+                    "systs covariance matrix must have shape "
+                    f"({len(bins)-1}, {len(bins)-1}); got {systs.shape}"
+                )
+            total_cov = np.array(systs, dtype=float, copy=True)
+        else:
+            raise ValueError("systs must be a 2D covariance matrix")
+        systs_arr = np.sqrt(np.clip(np.diag(total_cov), a_min=0.0, a_max=None))
     elif (systs==True) & (found_systs): 
         syst_dict = get_syst(reco_df=df,reco_var=var,bins=bins,scale=False)
-        total_cov = np.zeros(len(bins)-1)
+        has_mcstat_in_syst_dict = any(str(key).lower() == 'mcstat' for key in syst_dict.keys())
+        syst_cov = np.zeros((len(bins)-1, len(bins)-1))
         for key in syst_dict.keys():
-            total_cov += np.diag(syst_dict[key]['cov'])
-        systs_arr = np.sqrt(total_cov)
+            syst_cov += syst_dict[key]['cov']
+        total_cov = syst_cov
+        systs_arr = np.sqrt(np.clip(np.diag(total_cov), a_min=0.0, a_max=None))
     else:
         if (systs==True) & (found_systs==False):
             print("can't find universes in the input df, ignoring systematic error bars")
@@ -214,36 +278,44 @@ def plot_var(df: pd.DataFrame,
         systs_arr = np.zeros(len(bins)-1)
         syst_dict = {}
 
-    # Only calculate statistical error if systs not provided as array
-    if not systs_is_array:
-        if weight==False:
-            stats_err = np.sqrt(stats) * scale
+    # Only calculate statistical error if it is not already included in syst_dict.
+    # For weighted MC, the variance per bin is the sum of w^2; for unweighted
+    # MC, this reduces to the usual Poisson sqrt(N).
+    calc_separate_mcstat = (not systs_is_array) and (not ((systs == True) and found_systs and has_mcstat_in_syst_dict))
+    if calc_separate_mcstat:
+        if weight:
+            stats_var = get_hist1d(data=df[var],
+                                   weights=np.square(df['weights_mc']),
+                                   bins=bins,
+                                   overflow=overflow)
         else:
-            unique_weights = df.weights_mc.unique()
-            for i in range(len(unique_weights)):
-                hist = get_hist1d(data=df[df.weights_mc == unique_weights[i]][var],
-                                  bins=bins,overflow=True)
-                stats_err += (hist * unique_weights[i]**2)
-            stats_err = np.sqrt(stats_err) * scale
+            stats_var = get_hist1d(data=df[var],
+                                   bins=bins,
+                                   overflow=overflow)
+        stats_err = np.sqrt(stats_var) * scale
+        total_cov += np.diag(stats_var)
 
     # Systematic error calculation
     systs_err = systs_arr * scale
-
+    total_cov = total_cov * (scale ** 2)
     if normalize:
         total_integral = np.sum(hists * bin_widths)
         hists = hists / total_integral
-        if not systs_is_array:
+        if calc_separate_mcstat:
             stats_err = stats_err / total_integral
         systs_err = systs_err / total_integral
+        total_cov = total_cov / (total_integral ** 2)
         
     for i in range(ncategories):
         color = colors[i]
         if pdg: 
-            plot_label = (list(pdg_dict.keys())+['cosmic']+['offbeam']+['other'])[i]
+            plot_label = (list(pdg_dict.keys())+['non-$\\nu$ $e$']+['cosmic']+['offbeam']+['other'])[i]
             if 'cosmic' in plot_label: 
                 color = colors[signal_dict['cosmic']]
             if 'offbeam' in plot_label: 
                 color = colors[signal_dict['offbeam']]
+            if 'other' in plot_label: 
+                color = 'sienna'
         else: plot_label = category_labels[i]
         if (mult_factor!= 1.0) & (i==0): plot_label +=  f" [x{mult_factor}]"
         if counts: plot_label += f" ({int(hist_counts[i]):,})" if hist_counts[i] < 1e6 else f"({hist_counts[i]:.2e}"
@@ -268,7 +340,7 @@ def plot_var(df: pd.DataFrame,
             min_total_err = steps[-1] - np.append(systs_err[0], systs_err)
             pls_total_err = steps[-1] + np.append(systs_err[0], systs_err)
             ax.fill_between(bins, min_total_err, pls_total_err, **systs_options, label="MC stat.+syst.")
-        elif found_systs:
+        elif found_systs and calc_separate_mcstat:
             # Separate stat and syst bands
             stats_options = {"step":"pre", "color":mpl.colors.to_rgba("gray", alpha=0.9),
                              "lw":0.0,"facecolor":"none","hatch":"....",
@@ -280,6 +352,11 @@ def plot_var(df: pd.DataFrame,
             ax.fill_between(bins, min_systs_err, pls_systs_err, **systs_options,label="MC syst.")
             ax.fill_between(bins, min_systs_err, min_stats_err, **stats_options,label="MC stat.")
             ax.fill_between(bins, pls_systs_err, pls_stats_err, **stats_options)
+        elif found_systs:
+            # syst_dict already includes MC stat uncertainty; draw the combined band once.
+            min_total_err = steps[-1] - np.append(systs_err[0], systs_err)
+            pls_total_err = steps[-1] + np.append(systs_err[0], systs_err)
+            ax.fill_between(bins, min_total_err, pls_total_err, **systs_options, label="MC stat.+syst.")
         else: 
             # Only stat errors
             stats_options = {"step":"pre", "color":mpl.colors.to_rgba("gray", alpha=0.9),
@@ -294,8 +371,8 @@ def plot_var(df: pd.DataFrame,
         for i in range(len(cut_val)):
             ax.axvline(cut_val[i],lw=2,color="gray",linestyle="--",zorder=cut_line_zorder)
     
-    # Total error is just systs_err if array provided, otherwise stat + syst
-    total_err = systs_err if systs_is_array else (stats_err + systs_err)
+    total_err = np.sqrt(np.clip(np.diag(total_cov), a_min=0.0, a_max=None))
+    syst_dict['__total_cov__'] = total_cov
 
     ax.set_xlabel('_'.join(var)) if xlabel == "" else ax.set_xlabel(xlabel)
     ax.set_ylabel("Counts")      if ylabel == "" else ax.set_ylabel(ylabel)
@@ -391,6 +468,7 @@ def plot_mc_data(mc_df: pd.DataFrame,
                  figsize: tuple[int, int] = (7, 6),
                  ratio_min: float = 0.0,
                  ratio_max: float = 2.0,
+                 annot: bool = True,
                  savefig: str = "",
                  **kwargs) -> tuple[plt.Figure, plt.Axes, plt.Axes]:
     """Create a combined MC stack + data overlay plot with data/MC ratio subplot.
@@ -448,9 +526,11 @@ def plot_mc_data(mc_df: pd.DataFrame,
         # shading is around unity    
         ps_err = 1 + np.append(mc_contribution[0],mc_contribution)
         ms_err = 1 - np.append(mc_contribution[0],mc_contribution)
+
+    nbins = len(bins)-1
+    mc_total_cov = mc_dict.get('__total_cov__') if isinstance(mc_dict, dict) else None
         
     bin_centers = 0.5 * (mc_bins[1:] + mc_bins[:-1])
-    nbins = len(bins)-1
     
     ax_sub.errorbar(bin_centers, ratio, yerr=ratio_err, fmt='s', markersize=3,color='black', zorder=1e3, label='data/MC ratio')
     # fill_between needs last entry to be repeated 
@@ -467,6 +547,83 @@ def plot_mc_data(mc_df: pd.DataFrame,
         for cut in cut_val:
             # ax_main.axvline(cut, color='black', linestyle='--', linewidth=2, alpha=0.5, zorder=1e2)
             ax_sub.axvline (cut, color='black', linestyle='--', linewidth=2, alpha=0.5, zorder=1e2)
+
+    total_data = np.sum(data_hist)
+    total_mc = np.sum(mc_tot)
+
+    data_cov = np.diag(np.square(data_err))
+    counts_cov = data_cov.copy()
+    if isinstance(mc_total_cov, np.ndarray) and mc_total_cov.shape == (nbins, nbins):
+        counts_cov += mc_total_cov
+        mc_counts_cov = mc_total_cov
+    else:
+        counts_cov += np.diag(np.square(mc_err))
+        mc_counts_cov = np.diag(np.square(mc_err))
+
+    total_ratio = total_data / total_mc
+    mc_err = np.sqrt(np.sum(mc_counts_cov)) * (total_ratio / total_mc)
+    data_err = np.sqrt(total_data) / total_mc
+    total_ratio_err = np.sqrt(data_err**2 + mc_err**2)
+
+    valid = np.isfinite(data_hist) & np.isfinite(mc_tot)
+    ndf = nbins
+    chi2 = np.nan
+    p_value = np.nan
+    if np.count_nonzero(valid) > 0:
+        delta = data_hist[valid] - mc_tot[valid]
+        cov_sel = counts_cov[np.ix_(valid, valid)]
+        try:
+            chi2 = float(delta.T @ np.linalg.pinv(cov_sel) @ delta)
+            if chi2_dist is not None and np.isfinite(chi2):
+                p_value = float(chi2_dist.sf(chi2, df=ndf))
+        except np.linalg.LinAlgError:
+            chi2 = np.nan
+            p_value = np.nan
+
+    fig.canvas.draw()
+    legend_loc = ""
+    if isinstance(kwargs.get('legend_kwargs'), dict):
+        legend_loc = str(kwargs['legend_kwargs'].get('loc', '')).lower()
+
+    anchor_right = False
+    if 'right' in legend_loc:
+        anchor_right = True
+    elif ('left' in legend_loc) or ('center' in legend_loc):
+        anchor_right = False
+    else:
+        main_legend = ax_main.get_legend()
+        if main_legend is not None:
+            legend_box = main_legend.get_window_extent(renderer=fig.canvas.get_renderer()).transformed(ax_main.transAxes.inverted())
+            anchor_right = legend_box.x0 > 0.5
+
+    main_legend = ax_main.get_legend()
+    ann_fontsize = 'small'
+    if main_legend is not None:
+        legend_box = main_legend.get_window_extent(renderer=fig.canvas.get_renderer()).transformed(ax_main.transAxes.inverted())
+        ann_x = legend_box.x1 if anchor_right else legend_box.x0
+        ann_y = legend_box.y0
+        if main_legend.get_texts():
+            ann_fontsize = main_legend.get_texts()[0].get_fontsize()
+    else:
+        ann_x = 0.98 if anchor_right else 0.02
+        ann_y = 0.98
+    ann_ha = 'right' if anchor_right else 'left'
+
+    if annot:
+        ax_main.annotate(rf"$\Sigma$ Data/MC = {total_ratio:.2f} $\pm$ {total_ratio_err:.2f}",
+                        xy=(ann_x, ann_y),
+                        xycoords=ax_main.transAxes,
+                        xytext=(0, -6),
+                        textcoords='offset points',
+                        ha=ann_ha, va='top', fontsize=ann_fontsize)
+        
+        ax_main.annotate(rf"$\chi^2$/ndf = {chi2:.1f}/{ndf}, $p$ = {p_value:.2g}",
+                        xy=(ann_x, ann_y),
+                        xycoords=ax_main.transAxes,
+                        xytext=(0, -20),
+                        textcoords='offset points',
+                        ha=ann_ha, va='top', fontsize=ann_fontsize)
+
     if bin_labels is not None:
         ax_main.set_xticks(bins)
         ax_main.set_xticklabels(bin_labels)
