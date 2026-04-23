@@ -23,6 +23,7 @@ class VariableConfig:
         self.bins = bins
         self.bin_centers = (bins[:-1] + bins[1:]) / 2.
         self.bin_labels = bin_labels
+        self.bin_diff_labels = [f"{bin_labels[i]}-{bin_labels[i+1]}" for i in range(len(bin_labels)-1)]
         self.var_evt_reco_col = var_evt_reco_col
         self.var_evt_truth_col = var_evt_truth_col
         self.var_nu_col = var_nu_col
@@ -32,7 +33,7 @@ class VariableConfig:
     def electron_energy(cls):
         return cls(
             var_save_name="energy",
-            var_plot_name="E_{e-}",
+            var_plot_name="$E_{e-}$",
             var_unit="GeV",
             bins=np.array([0.5,0.7,0.95,1.25,1.7,2.5]),
             bin_labels =  np.array([0.5, 0.7, 0.95, 1.25, 1.7, 5]),
@@ -45,7 +46,7 @@ class VariableConfig:
     def electron_direction(cls):
         return cls(
             var_save_name="direction",
-            var_plot_name="\\cos\\theta_{e-}",
+            var_plot_name="$\\cos\\theta_{e-}$",
             var_unit="",
             bins= np.array([0.5,0.6,0.75,0.85,0.925,1.0]),
             bin_labels =  np.array([0.0  , 0.6  , 0.75 , 0.85 , 0.925, 1.   ]),
