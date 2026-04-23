@@ -42,22 +42,22 @@ def is_xsec(col: tuple, xsec_inputs: XSecInputs | None) -> bool:
     ----------
     col : tuple
         MultiIndex column name.
-    xsec : bool
-        Whether xsec mode is enabled.
-    sigdf : pd.DataFrame or None
-        Truth-level signal DataFrame.
-    var_true : tuple or None
-        True-level variable column in reco DataFrame.
-    var_sig : tuple or None
-        True-level variable column in signal DataFrame.
+    xsec_inputs : XSecInputs or None
+        Cross-section inputs containing truth-level signal dataframe, scaling,
+        and true-variable column mappings.
     
     Returns
     -------
     bool
-        True if column contains "GENIE" and all xsec parameters are provided; False otherwise.
+        True if column contains "GENIE" and all xsec inputs are provided; False otherwise.
     """
-    return ("GENIE" in "".join(list(col)) and xsec and sigdf is not None 
-            and var_true is not None and var_sig is not None)
+    return (
+        "GENIE" in "".join(list(col))
+        and xsec_inputs is not None
+        and xsec_inputs.true_signal_df is not None
+        and xsec_inputs.reco_var_true is not None
+        and xsec_inputs.true_var_true is not None
+    )
 
 def calc_matrices(var_arr: np.ndarray, cv: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -126,32 +126,28 @@ def calc_matrices_explicit(var_arr,cv):
                 corr[i,j] = cov[i,j] / (np.sqrt ( cov[i,i] )* np.sqrt( cov[j,j] ))
     return cov, cov_frac, corr
 
-def get_evtrate(indf,sigdf,sel_weights,sig_weights,sig_scale,var, var_true, var_sig, bins): 
+def get_xsec_hists(reco_df: pd.DataFrame,
+                   xsec_inputs: XSecInputs,
+                   reco_weights: np.ndarray,
+                   true_signal_weights: np.ndarray,
+                   bins: np.ndarray,
+                   reco_var_reco: str | tuple) -> np.ndarray:
     """Compute predicted event-rate histograms for cross-section systematic universes.
     
     Parameters
     ----------
-    indf : pd.DataFrame
+    reco_df : pd.DataFrame
         Selected (reco-level) DataFrame. Must contain a ``signal`` column
         (0 = signal, nonzero = background) and the reco/true variable columns.
-    sigdf : pd.DataFrame
-        Truth-level signal DataFrame used for the denominator of the
-        response matrix (generated events).
-    sel_weights : np.ndarray, shape (n_selected, n_universes)
-        Per-event systematic weights for the selected sample.
-    sig_weights : np.ndarray, shape (n_signal, n_universes)
+    xsec_inputs : XSecInputs
+        Cross-section inputs with true signal dataframe, scaling, and variable mappings.
+    reco_weights : np.ndarray, shape (n_selected, n_universes)
+        Per-event systematic weights for the reco-level selected sample.
+    true_signal_weights : np.ndarray, shape (n_signal, n_universes)
         Per-event systematic weights for the truth-level signal sample.
-    sig_scale : float
-        Overall scale factor to apply to the signal weights.
-    var : tuple
-        Column key for the reco-level variable to histogram
+    reco_var_reco : tuple
+        Column key for the reco-level variable to histogram from the reco-level DataFrame.
         (e.g. ``('primshw','shw','reco_energy')``).
-    var_true : tuple
-        Column key for the true-level variable in the selected DataFrame
-        (e.g. ``('primshw','shw','truth','p','genE')``).
-    var_sig : tuple 
-        Column key for the true-level variable in the signal DataFrame 
-        (e.g. ``(`e`,`genE`)``). 
     bins : np.ndarray
         Bin edges (shared for reco and true axes). Overflow is folded into
         the last bin.
@@ -164,19 +160,24 @@ def get_evtrate(indf,sigdf,sel_weights,sig_weights,sig_scale,var, var_true, var_
         per-universe response matrix and ``bkg_u`` is the weighted
         background histogram.
     """
-    sigdf = sigdf[sigdf.signal==0]  # ensure sigdf is signal-only
-    signal_mask = indf.signal==0
+    true_signal_df    = xsec_inputs.true_signal_df
+    true_signal_scale = xsec_inputs.true_signal_scale
+    reco_var_true     = xsec_inputs.reco_var_true
+    true_var_true     = xsec_inputs.true_var_true
+
+    true_signal_df = true_signal_df[true_signal_df.signal==0]  # ensure signal-only truth sample
+    signal_mask = reco_df.signal==0
     smearing = np.apply_along_axis(get_hist2d,0,
-                                   sel_weights[signal_mask],
-                                   indf[signal_mask][var],
-                                   indf[signal_mask][var_true],
+                                   reco_weights[signal_mask],
+                                   reco_df[signal_mask][reco_var_reco],
+                                   reco_df[signal_mask][reco_var_true],
                                    bins)
 
     sig_hist_univ = np.apply_along_axis(get_hist1d,0,
-                                        sig_weights,
-                                        sigdf[var_sig],bins)
-    sig_hist_cv = get_hist1d(np.ones(len(sigdf))*sig_scale,
-                              sigdf[var_sig],
+                                        true_signal_weights,
+                                        true_signal_df[true_var_true],bins)
+    sig_hist_cv = get_hist1d(np.ones(len(true_signal_df))*true_signal_scale,
+                              true_signal_df[true_var_true],
                               bins)
     
     response = np.divide(smearing,sig_hist_univ,
@@ -185,13 +186,13 @@ def get_evtrate(indf,sigdf,sel_weights,sig_weights,sig_scale,var, var_true, var_
     # response x cv 
     sig_reco_hists = np.einsum('ijk,j->ik', response, sig_hist_cv)
     bkg_reco_hists = np.apply_along_axis(get_hist1d,0,
-                                         sel_weights[~signal_mask],
-                                         indf[~signal_mask][var],
+                                         reco_weights[~signal_mask],
+                                         reco_df[~signal_mask][reco_var_reco],
                                          bins)
     return sig_reco_hists + bkg_reco_hists
 
-def get_syst_hists(indf: pd.DataFrame,
-                   var: str | tuple,
+def get_syst_hists(reco_df: pd.DataFrame,
+                   reco_var: str | tuple,
                    bins: np.ndarray,
                    scale: bool = True,
                    xsec_inputs: XSecInputs | None = None,
@@ -206,13 +207,13 @@ def get_syst_hists(indf: pd.DataFrame,
         - syst_hist_dict[key]['hists'] has shape (nbins, nuniv)
         - cv_hist is the flux-normalized CV histogram
     """
-    indf = ensure_lexsorted(indf, axis=0)
-    indf = ensure_lexsorted(indf, axis=1)
+    reco_df = ensure_lexsorted(reco_df, axis=0)
+    reco_df = ensure_lexsorted(reco_df, axis=1)
 
     unisim_col, multisig_col, multisim_col = [], [], []
     univ_level = -1
 
-    for col in indf.columns:
+    for col in reco_df.columns:
         if "univ" in "".join(list(col)):
             for i, x in enumerate(col):
                 if str(x).startswith("univ"):
@@ -220,10 +221,10 @@ def get_syst_hists(indf: pd.DataFrame,
                     break
             break
 
-    scaling = np.ones(indf.shape[0])
-    for col in indf.columns:
+    scaling = np.ones(reco_df.shape[0])
+    for col in reco_df.columns:
         if ("flux_pot_norm" in col) and scale:
-            scaling = indf[col].values
+            scaling = reco_df[col].values
         if "morph" in col:
             unisim_col.append(tuple(filter(None, col)))
         elif "ps1" in col:
@@ -233,10 +234,10 @@ def get_syst_hists(indf: pd.DataFrame,
             if base not in multisim_col:
                 multisim_col.append(base)
 
-    if np.array_equal(scaling, np.ones(indf.shape[0])) and scale:
+    if np.array_equal(scaling, np.ones(reco_df.shape[0])) and scale:
         print("No flux-averaged POT normalization found; flux normalization will be equal to one.")
 
-    cv = get_hist1d(data=indf[var], bins=bins, weights=scaling)
+    cv = get_hist1d(data=reco_df[reco_var], bins=bins, weights=scaling)
     cv_counts = np.sum(cv)
     nbins = len(bins)
     syst_dict = {}
@@ -268,6 +269,7 @@ def get_syst_hists(indf: pd.DataFrame,
         for col in tqdm(unisim_col, desc='Running through unisims'):
             weights = reco_df[col].values.astype(np.float64)
             weights[np.isnan(weights)] = 1.0
+            weights[(weights>10) | (weights < 0)] = 1.0 
             weights *= scaling
 
             if is_xsec(col, xsec_inputs):
@@ -289,8 +291,10 @@ def get_syst_hists(indf: pd.DataFrame,
 
             ps1 = np.nan_to_num(reco_df[ps1_col].values.astype(np.float64), copy=False, nan=1.0)
             ms1 = np.nan_to_num(reco_df[ms1_col].values.astype(np.float64), copy=False, nan=1.0)
+            ps1[(ps1>10) | (ps1<0)] = 1  # cap extreme outliers to avoid dominating the histograms
+            ms1[(ms1>10) | (ms1<0)] = 1
             weights = np.stack([ps1, ms1]).T * scaling[:, np.newaxis]
-
+            
             if is_xsec(col, xsec_inputs):
                 true_signal_ps1 = np.nan_to_num(xsec_inputs.true_signal_df[ps1_col[2:]].values.astype(np.float64), copy=False, nan=1.0)
                 true_signal_ms1 = np.nan_to_num(xsec_inputs.true_signal_df[ms1_col[2:]].values.astype(np.float64), copy=False, nan=1.0)
@@ -303,20 +307,20 @@ def get_syst_hists(indf: pd.DataFrame,
 
     # multisim
     for col in tqdm(multisim_col, desc='Running through multisims'):
-        weights = indf[col].values.astype(np.float64)
+        weights = reco_df[col].values.astype(np.float64)
         weights[np.isnan(weights)] = 1.0
+        weights[(weights>10) | (weights<0)] = 1
         weights *= scaling[:, np.newaxis]
 
-        if is_xsec_rate(col, xsec, sigdf, var_true, var_sig):
-            sig_weights = sigdf[col[2:]].values.astype(np.float64) * scale_sig
-            hists = get_evtrate(indf, sigdf, weights, sig_weights, scale_sig, var, var_true, var_sig, bins)
+        if is_xsec(col, xsec_inputs):
+            true_signal_weights = xsec_inputs.true_signal_df[col[2:]].values.astype(np.float64) * xsec_inputs.true_signal_scale
+            hists = get_xsec_hists(reco_df, xsec_inputs, weights, true_signal_weights, bins, reco_var)
         else:
-            hists = np.apply_along_axis(get_hist1d, 0, weights, indf[var], bins)
+            hists = np.apply_along_axis(get_hist1d, 0, weights, reco_df[reco_var], bins)
 
         syst_dict[col[2]] = {'hists': hists}
 
     return syst_dict, cv
-
 
 def get_syst(*args, **kwargs) -> dict:
     """Backward-compatible API: returns hists + cov/cov_frac/corr per systematic."""
@@ -391,8 +395,6 @@ def get_detvar_systs(detvar_dict,var,bins,event_type: str | None = "all",**selec
         - 'dv_df': DataFrame or list of DataFrames with detector variations
         - 'cv_df': DataFrame with central value
         - 'flux_pot_norm': Normalization factor
-    stage : str
-        Selection stage to apply (e.g., "opening angle").
     var : str or tuple
         Column name for the variable to histogram.
     bins : np.ndarray
@@ -474,6 +476,12 @@ def get_syst_df(dicts: list, cv_hist: np.ndarray) -> pd.DataFrame:
     """
     categories = ["GENIE", "Flux", "MCstat", "DetVar",'Geant4']
 
+    def classify_category(key: str) -> str | None:
+        """Map raw systematic keys to high-level categories."""
+        if ("SBNNuSyst" in key) or ("SuSAv2" in key):
+            return "GENIE"
+        return next((cat for cat in categories if cat in key), None)
+
     def classify_detvar_subcategory(detvar_key: str) -> str:
         """Map detector variation names to analysis subcategories."""
         key = detvar_key.lower()
@@ -509,7 +517,7 @@ def get_syst_df(dicts: list, cv_hist: np.ndarray) -> pd.DataFrame:
             unc = np.sqrt(np.diag(cov)) / cv_hist
             tot = np.sum(unc)/len(unc)
 
-            category = next((cat for cat in categories if cat in key), None)            
+            category = classify_category(key)
             if category is None:
                 print(f"Warning: category not found for key '{key}'")
                 records.append({
