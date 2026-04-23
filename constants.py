@@ -17,7 +17,7 @@ signal_dict = {"nueCC":0,
 
 signal_labels = [r"CC $\nu_e$",
                  r"CC $\nu_\mu\pi^0$",
-                 r"NC$\nu$$\pi^0$",
+                 r"NC $\nu$$\pi^0$",
                  r"other CC $\nu_\mu$",
                  r"other CC $\nu_e$",
                  r"other NC $\nu$",
@@ -41,6 +41,16 @@ pdg_dict = {
     r"$p$":        {"pdg":2212, },
     r"$\pi^{+/-}$":{"pdg":211,  },
 }
+
+mode_dict = {
+    "QE": 0,
+    "RES": 1,
+    "DIS": 2,
+    "COH": 3,
+    "MEC": 10,
+}
+
+mode_colors = sns.color_palette("Dark2", n_colors=len(mode_dict)+1)
 
 # flux file, units: /m^2/10^6 POT, 50 MeV bins
 with uproot.open(config.FLUX_FILE) as f:
