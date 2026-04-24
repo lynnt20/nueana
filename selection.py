@@ -115,7 +115,9 @@ def select(indf,
            min_shower_length=0.1,
            max_shower_length=200,
            min_direction=-1,
-           max_direction=1):
+           max_direction=1,
+           extra_cuts=None,
+           skip_cuts=None):
     """Apply the full nue CC selection to a DataFrame.
 
     Parameters
@@ -158,6 +160,15 @@ def select(indf,
         Shower length range in cm.
     min_direction, max_direction : float
         Shower direction (cos theta) range.
+    extra_cuts : callable or list of callable, optional
+        Additional cut function(s) applied after all named stages. Each must
+        accept a DataFrame and return a boolean mask, e.g.
+        ``lambda df: abs(df.x) > 10``.
+    skip_cuts : list of str, optional
+        Named stages to skip entirely. Valid names match the ``stage``
+        parameter: ``'preselection'``, ``'flash matching'``, ``'shower energy'``,
+        ``'muon rejection'``, ``'conversion gap'``, ``'dEdx'``,
+        ``'opening angle'``, ``'shower length'``.
 
     Returns
     -------
@@ -171,6 +182,13 @@ def select(indf,
     ]
     if stage is not None and stage not in valid_stages:
         raise ValueError(f"Unknown stage '{stage}'. Valid options: {valid_stages}")
+
+    skip = set(skip_cuts or [])
+    invalid_skips = skip - set(valid_stages)
+    if invalid_skips:
+        raise ValueError(f"skip_cuts contains unknown stages: {sorted(invalid_skips)}. Valid options: {valid_stages}")
+
+    _extra = extra_cuts if isinstance(extra_cuts, list) else [extra_cuts] if extra_cuts is not None else []
 
     df_dict = {}
     df = indf.copy()
@@ -189,39 +207,50 @@ def select(indf,
             return df_dict if savedict else current_df
         return None
 
-    df = df[cut_preselection(df, pe_cut=pe_cut, nuscore_cut=nuscore_cut, realisticFV=realisticFV)]
+    if 'preselection' not in skip:
+        df = df[cut_preselection(df, pe_cut=pe_cut, nuscore_cut=nuscore_cut, realisticFV=realisticFV)]
     result = save_stage('preselection', df)
     if result is not None: return result
 
-    df = df[cut_flash_matching(df, spill_start=spill_start, spill_end=spill_end, score_cut=score_cut)]
+    if 'flash matching' not in skip:
+        df = df[cut_flash_matching(df, spill_start=spill_start, spill_end=spill_end, score_cut=score_cut)]
     result = save_stage('flash matching', df)
     if result is not None: return result
 
-    df = df[cut_shower_energy(df, min_shower_energy=min_shower_energy)]
+    if 'shower energy' not in skip:
+        df = df[cut_shower_energy(df, min_shower_energy=min_shower_energy)]
     result = save_stage('shower energy', df)
     if result is not None: return result
 
-    df = df[cut_muon_rejection(df, max_track_length=max_track_length)]
+    if 'muon rejection' not in skip:
+        df = df[cut_muon_rejection(df, max_track_length=max_track_length)]
     result = save_stage('muon rejection', df)
     if result is not None: return result
 
-    df = df[cut_conversion_gap(df, min_conversion_gap=min_conversion_gap, max_conversion_gap=max_conversion_gap)]
+    if 'conversion gap' not in skip:
+        df = df[cut_conversion_gap(df, min_conversion_gap=min_conversion_gap, max_conversion_gap=max_conversion_gap)]
     result = save_stage('conversion gap', df)
     if result is not None: return result
 
-    df = df[cut_dedx(df, min_dedx=min_dedx, max_dedx=max_dedx)]
+    if 'dEdx' not in skip:
+        df = df[cut_dedx(df, min_dedx=min_dedx, max_dedx=max_dedx)]
     result = save_stage('dEdx', df)
     if result is not None: return result
 
-    df = df[cut_opening_angle(df, min_opening_angle=min_opening_angle, max_opening_angle=max_opening_angle)]
+    if 'opening angle' not in skip:
+        df = df[cut_opening_angle(df, min_opening_angle=min_opening_angle, max_opening_angle=max_opening_angle)]
     result = save_stage('opening angle', df)
     if result is not None: return result
 
-    df = df[cut_shower_length(df, min_shower_length=min_shower_length, max_shower_length=max_shower_length)]
+    if 'shower length' not in skip:
+        df = df[cut_shower_length(df, min_shower_length=min_shower_length, max_shower_length=max_shower_length)]
     result = save_stage('shower length', df)
     if result is not None: return result
 
     df = df[cut_direction(df, min_direction=min_direction, max_direction=max_direction)]
+
+    for cut_fn in _extra:
+        df = df[cut_fn(df)]
 
     return df_dict if savedict else df
 

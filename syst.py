@@ -397,77 +397,84 @@ def mcstat(indf, nuniv:int=100 , cols: list=['__ntuple','entry','rec.slc..index'
     return df.join(mcstat_univ_wgt)
 
 
-def get_detvar_systs(detvar_dict,var,bins,event_type: str | None = "all",**selection_kwargs):
+def get_detvar_systs(detvar_dict, var, bins,
+                     event_type: str | None = "all",
+                     extra_cuts=None,
+                     skip_cuts=None,
+                     **selection_kwargs):
     """Compute detector variation systematic covariance matrices.
-    
+
     Parameters
     ----------
     detvar_dict : dict
         Dictionary mapping detector variation names to dictionaries containing:
         - 'dv_df': DataFrame or list of DataFrames with detector variations
         - 'cv_df': DataFrame with central value
-        - 'flux_pot_norm': Normalization factor
+        - 'pot': POT for flux normalization
     var : str or tuple
         Column name for the variable to histogram.
     bins : np.ndarray
         Bin edges for histogramming.
+    event_type : str or None, default 'all'
+        Event mask applied after selection (see :func:`~nueana.utils.apply_event_mask`).
+    extra_cuts : callable or list of callable, optional
+        Additional cut function(s) applied after the standard selection pipeline.
+        Each must accept a DataFrame and return a boolean mask, e.g.
+        ``lambda df: abs(df.x) > 10``. Forwarded to :func:`~nueana.selection.select`.
+    skip_cuts : list of str, optional
+        Named selection stages to skip. Forwarded to :func:`~nueana.selection.select`.
+        Valid names: ``'preselection'``, ``'flash matching'``, ``'shower energy'``,
+        ``'muon rejection'``, ``'conversion gap'``, ``'dEdx'``,
+        ``'opening angle'``, ``'shower length'``.
     **selection_kwargs
-        Additional keyword arguments forwarded to the `select` function.
+        Any other keyword arguments forwarded to :func:`~nueana.selection.select`
+        (e.g. ``min_dedx``, ``max_track_length``).
 
     Returns
     -------
     dict
         Dictionary mapping detector variation names to dictionaries containing:
-        - 'hists': Histograms per variation
-        - 'cov': Covariance matrix
-        - 'cov_frac': Fractional covariance matrix
-        - 'corr': Correlation matrix
-        - 'hist_cv': Central value histogram
+        - 'hists': per-variation histograms, shape (nbins, nuniv)
+        - 'cov': covariance matrix
+        - 'cov_frac': fractional covariance matrix
+        - 'corr': correlation matrix
+        - 'hist_cv': central-value histogram
 
     Notes
     -----
-    - If ``this_dict['dv_df']`` is a single DataFrame, the variation is treated
-      as a **unisim** (one universe).
-    - If ``this_dict['dv_df']`` is a list of DataFrames, the variation is treated
-      as a **multisim** (one universe per DataFrame).
-    - Histograms are flux-POT-normalized using ``this_dict['flux_pot_norm']``.
-      Ensure ``detvar_dict[key]['flux_pot_norm']`` is set to 1.0 if no normalization is desired.
-    - When ``normalize=True``, each DetVar histogram is area-normalized to match the CV.
+    If ``this_dict['dv_df']`` is a single DataFrame the variation is treated as
+    a unisim; if it is a list of DataFrames it is treated as a multisim.
     """
+    _needs_select = bool(selection_kwargs) or extra_cuts is not None or skip_cuts is not None
+    _sel_kw = dict(savedict=False, extra_cuts=extra_cuts, skip_cuts=skip_cuts, **selection_kwargs)
+
     matrices_dict = {}
-    for i, key in tqdm(enumerate(detvar_dict.keys())): 
+    for i, key in tqdm(enumerate(detvar_dict.keys())):
         this_dict = detvar_dict[key]
         this_dv   = this_dict['dv_df']
         this_cv   = this_dict['cv_df']
-        # this is for flux-normalizing
-        # re-normalize in case flux calculation has changed
-        this_norm = integrated_flux*(this_dict['pot']/1e6)
-        
-        # lexsort to avoid performance warning on columns 
-        # forward selection kwargs to select function
-        if selection_kwargs:
-            cv_sel = select(this_cv, savedict=False, **selection_kwargs)
-        else:
-            cv_sel = this_cv
-        cv_sel = apply_event_mask(ensure_lexsorted(cv_sel, axis=1), event_type)
-        cv_hist = get_hist1d(data=cv_sel[var],bins=bins)/this_norm
+        this_norm = integrated_flux * (this_dict['pot'] / 1e6)
 
-        # support both unisim (single df) and multisim (list of dfs)
+        cv_sel = select(this_cv, **_sel_kw) if _needs_select else this_cv
+        cv_sel = apply_event_mask(ensure_lexsorted(cv_sel, axis=1), event_type)
+        cv_hist = get_hist1d(data=cv_sel[var], bins=bins) / this_norm
+
         dv_dfs = this_dv if isinstance(this_dv, list) else [this_dv]
-        if selection_kwargs:
-            dv_dfs = [select(dv, savedict=False, **selection_kwargs) for dv in dv_dfs]
+        if _needs_select:
+            dv_dfs = [select(dv, **_sel_kw) for dv in dv_dfs]
         dv_hists = np.column_stack([
-            get_hist1d(
-                data=apply_event_mask(ensure_lexsorted(dv, axis=1),event_type)[var],bins=bins)
+            get_hist1d(data=apply_event_mask(ensure_lexsorted(dv, axis=1), event_type)[var], bins=bins)
             for dv in dv_dfs
-        ])/this_norm  # shape: (nbins, nuniv)
-        
+        ]) / this_norm
+
         cov, cov_frac, corr = calc_matrices(var_arr=dv_hists, cv=cv_hist)
-        matrices_dict[key] = {'hists': dv_hists,
-                              'cov': cov,
-                              'cov_frac': cov_frac,
-                              'corr': corr, 
-                              'hist_cv': cv_hist}
+        matrices_dict[key] = {
+            'hists':    dv_hists,
+            'cov':      cov,
+            'cov_frac': cov_frac,
+            'corr':     corr,
+            'hist_cv':  cv_hist,
+        }
     return matrices_dict
 
 
