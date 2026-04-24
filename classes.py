@@ -7,18 +7,18 @@ import numpy as np
 import pandas as pd
 
 class VariableConfig:
-    """
-    A configurable class for setting up unfolding variable configurations.
-    Choose a configuration using one of the provided class methods,
-    or instantiate directly with custom parameters.
+    """Configurable container for an unfolding variable.
+
+    Instantiate directly with all parameters, or use the pre-built factory
+    functions in :mod:`nueana.variables` (e.g. ``variables.electron_energy()``).
     """
     def __init__(self, var_save_name, var_plot_name, var_unit, bins, bin_labels, var_evt_reco_col, var_evt_truth_col, var_nu_col):
         self.var_save_name = var_save_name
         self.var_plot_name = var_plot_name
         self.var_unit = var_unit
         unit_suffix = f"~[{var_unit}]" if len(var_unit) > 0 else ""
-        self.var_labels = [r"$\mathrm{" + var_plot_name + unit_suffix + "}$", 
-                           r"$\mathrm{" + var_plot_name + "^{reco.}" + unit_suffix + "}$", 
+        self.var_labels = [r"$\mathrm{" + var_plot_name + unit_suffix + "}$",
+                           r"$\mathrm{" + var_plot_name + "^{reco.}" + unit_suffix + "}$",
                            r"$\mathrm{" + var_plot_name + "^{true}" + unit_suffix + "}$"]
         self.bins = bins
         self.bin_centers = (bins[:-1] + bins[1:]) / 2.
@@ -27,33 +27,6 @@ class VariableConfig:
         self.var_evt_reco_col = var_evt_reco_col
         self.var_evt_truth_col = var_evt_truth_col
         self.var_nu_col = var_nu_col
-
-
-    @classmethod
-    def electron_energy(cls):
-        return cls(
-            var_save_name="energy",
-            var_plot_name="$E_{e-}$",
-            var_unit="GeV",
-            bins=np.array([0.5,0.7,0.95,1.25,1.7,2.5]),
-            bin_labels =  np.array([0.5, 0.7, 0.95, 1.25, 1.7, 5]),
-            var_evt_reco_col=('primshw', 'shw', 'reco_energy'),
-            var_evt_truth_col=('slc','truth','e','genE'),
-            var_nu_col=('e','genE'),
-        )
-
-    @classmethod
-    def electron_direction(cls):
-        return cls(
-            var_save_name="direction",
-            var_plot_name="$\\cos\\theta_{e-}$",
-            var_unit="",
-            bins= np.array([0.5,0.6,0.75,0.85,0.925,1.0]),
-            bin_labels =  np.array([0.0  , 0.6  , 0.75 , 0.85 , 0.925, 1.   ]),
-            var_evt_reco_col=('primshw', 'shw', 'dir','z'),
-            var_evt_truth_col=('e','dir','z'),
-            var_nu_col=('e','dir','z')
-        )
 
 @dataclass(frozen=True)
 class XSecInputs:

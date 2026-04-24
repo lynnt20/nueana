@@ -10,6 +10,7 @@ __all__ = [
     'add_fractional_uncertainty',
     'get_intime_cov',
     'get_total_cov',
+    'load_detvar_dicts',
 ]
 import warnings
 import pickle
@@ -20,7 +21,7 @@ from .selection import select, select_sideband
 from .histogram import get_hist1d, get_hist2d
 from .syst import calc_matrices, get_syst, get_syst_df, get_detvar_systs
 from .classes import SystematicsOutput, XSecInputs
-from .constants import integrated_flux, signal_dict
+from .constants import integrated_flux, signal_dict, POT_NORM_UNC, NTARGETS_UNC
 from . import config
 
 def get_corr_from_cov(cov):
@@ -58,30 +59,31 @@ def _sum_covariances_from_dicts(syst_dicts, n_bins):
     return total_cov
 
 
-def _load_detvar_dicts(
-    detvar_files=None,
-):
+def load_detvar_dicts(detvar_files=None):
     """Load and combine detector variation dictionaries from pickle files.
-    
+
+    Load this once per session and pass the result directly to
+    :func:`get_total_cov` via its ``detvar_dict`` parameter to avoid
+    re-loading on every call (which can take minutes).
+
     Parameters
     ----------
     detvar_files : list of str, optional
-        List of paths to detvar dictionary pickle files. If None, uses config.DETVAR_DICT_FILES.
-    
+        Paths to detvar pickle files. Defaults to ``config.DETVAR_DICT_FILES``.
+
     Returns
     -------
     dict
-        Combined detector variation and recombination dictionary.
+        Combined detector variation dictionary.
     """
     if detvar_files is None:
         detvar_files = config.DETVAR_DICT_FILES
-        
+
     combined_dict = {}
     for detvar_file in detvar_files:
         with open(detvar_file, 'rb') as f:
-            file_dict = pickle.load(f)
-            combined_dict.update(file_dict)
-    
+            combined_dict.update(pickle.load(f))
+
     return combined_dict
 
 
@@ -90,8 +92,8 @@ def _apply_norm_and_intime_uncertainties(
     intime_cov: np.ndarray | None = None,
     include_norm: bool = True,
     include_cosmic: bool = True,
-    pot_norm_unc: float = 0.02,
-    ntargets_unc: float = 0.01,
+    pot_norm_unc: float = POT_NORM_UNC,
+    ntargets_unc: float = NTARGETS_UNC,
 ):
     updated = result
     if include_norm:
@@ -377,13 +379,14 @@ def get_intime_cov (selected_df, var, bins,
     return cov_final
     
 def get_total_cov(reco_df, reco_var, bins, mcbnb_pot,
-                  selection_kwargs=None, projected_pot=1e20, 
+                  selection_kwargs=None, projected_pot=1e20,
                   mcbnb_ngen: float | None = None,
                   intime_threshold: float = 0.05,
                   event_type: str | None = "all",
                   select_region: str = "signal",
                   uncertainty_keys: list[str] | tuple[str, ...] | set[str] | None = None,
-                  xsec_inputs: XSecInputs | None = None):
+                  xsec_inputs: XSecInputs | None = None,
+                  detvar_dict: dict | None = None):
     """
     Get the total event-rate covariance matrix and systematic dataframe for a
     given variable. Optionally also compute the xsec covariance matrix and
@@ -420,7 +423,12 @@ def get_total_cov(reco_df, reco_var, bins, mcbnb_pot,
         If None, defaults to {'rate', 'detv', 'norm', 'cosmic'} and adds
         'xsec' only when xsec_inputs is provided.
     xsec_inputs : XSecInputs, optional
-        Cross-section calculation inputs
+        Cross-section calculation inputs.
+    detvar_dict : dict, optional
+        Pre-loaded detector variation dictionary (from :func:`load_detvar_dicts`).
+        Pass this when calling ``get_total_cov`` multiple times in a session to
+        avoid reloading the pickle files on each call. If None and ``'detv'`` is
+        in ``uncertainty_keys``, the dict is loaded automatically.
 
     Returns
     -------
@@ -474,16 +482,17 @@ def get_total_cov(reco_df, reco_var, bins, mcbnb_pot,
     if select_region not in select_region_map:
         raise ValueError(f"select_region must be one of {list(select_region_map.keys())}, got '{select_region}'")
     
-    detvar_dict = {}
-    if include_detv:
+    if include_detv and detvar_dict is None:
         detvar_path = select_region_map[select_region]
         print(f"Loading detvar dictionary for region: {select_region}, located at: {detvar_path}")
         if select_region == "all":
-            detvar_dict = _load_detvar_dicts(detvar_path)
+            detvar_dict = load_detvar_dicts(detvar_path)
         else:
             with open(detvar_path, 'rb') as f:
                 detvar_dict = pickle.load(f)
         print(f"  Loaded {len(detvar_dict)} detector variation entries")
+    elif not include_detv:
+        detvar_dict = {}
 
     # Common selected sample and CV histogram used by all covariance terms.
     sorted_df = apply_event_mask(ensure_lexsorted(reco_df, axis=1), event_type)

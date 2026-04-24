@@ -10,6 +10,7 @@ __all__ = [
     'mode_categories', 'mode_dict',
     'nue_flux', 'flux_vals', 'integrated_flux',
     'RHO', 'N_A', 'M_AR', 'V_SBND', 'NTARGETS',
+    'POT_NORM_UNC', 'NTARGETS_UNC',
 ]
 
 # Signal == 0 is assumed to be the desired topology.
@@ -75,7 +76,10 @@ integrated_flux *= (180*180)/(200*200) # rescale the front face to AV front face
 RHO = 1.3836  #g/cm3, liquid Ar density
 N_A = 6.02214076e23 # Avogadro’s number
 M_AR = 40 # g, molar mass of argon
-# V_SBND = 380 * 380 * 440 # cm3, the active volume of the detector 
+# V_SBND = 380 * 380 * 440 # cm3, the active volume of the detector
 # x cm (drift) * z cm (width) * y cm (height), excluding 90 cm of y-dimension at high z
 V_SBND = (190)*2 * ((250 - 10)*(190*2) + (450-250)*(100 + 190))
 NTARGETS = RHO * V_SBND * N_A / M_AR
+
+POT_NORM_UNC  = 0.02  # fractional uncertainty on beam exposure (POT counting)
+NTARGETS_UNC  = 0.01  # fractional uncertainty on number of Ar targets
