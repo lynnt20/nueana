@@ -30,22 +30,6 @@ from .histogram import get_hist1d, get_hist2d
 from .selection import select, define_signal
 from .classes import XSecInputs
 from .constants import integrated_flux
-
-def _expand_weights(df, col, multisim_nuniv, scalars=None):
-        weights = df[col].values.astype(np.float64)
-        isnan = np.isnan(weights)
-
-        if scalars is None:
-            i_vals = np.arange(multisim_nuniv)
-            seed_strs = np.char.add(np.char.add("".join(list(col)), i_vals.astype(str)), str(id(df)))
-            seed_ints = np.fromiter((hash(s) % (2**32) for s in seed_strs), dtype=np.uint32, count=len(i_vals))
-            scalars = np.array([np.random.default_rng(int(s)).normal(0, 1) for s in seed_ints], dtype=np.float64)
-
-        # One random throw per universe (coherent across all events).
-        weights_mlt = 1 + (weights - 1)[:, np.newaxis] * scalars[np.newaxis, :]
-        weights_mlt = np.maximum(weights_mlt, 0)
-        weights_mlt[isnan, :] = 1.0  # reset NaN weights to 1.0
-        return weights_mlt
     
 def is_xsec(col: tuple, xsec_inputs: XSecInputs | None) -> bool:
     """Check if event rate calculation should be used for cross-section systematics.
@@ -143,9 +127,10 @@ def get_xsec_hists(reco_df: pd.DataFrame,
                    reco_weights: np.ndarray,
                    true_signal_weights: np.ndarray,
                    bins: np.ndarray,
-                   reco_var_reco: str | tuple) -> np.ndarray:
+                   reco_var_reco: str | tuple,
+                   return_response: bool = False) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """Compute predicted event-rate histograms for cross-section systematic universes.
-    
+
     Parameters
     ----------
     reco_df : pd.DataFrame
@@ -163,14 +148,19 @@ def get_xsec_hists(reco_df: pd.DataFrame,
     bins : np.ndarray
         Bin edges (shared for reco and true axes). Overflow is folded into
         the last bin.
+    return_response : bool, optional
+        If True, also return the per-universe response matrix. Default False.
 
     Returns
     -------
-    np.ndarray, shape (n_bins, n_universes)
+    hists : np.ndarray, shape (n_bins, n_universes)
         Predicted reco event-rate histogram for each universe, equal to
         ``response_u @ cv_truth + bkg_u`` where ``response_u`` is the
         per-universe response matrix and ``bkg_u`` is the weighted
         background histogram.
+    response : np.ndarray, shape (n_bins_reco, n_bins_true, n_universes)
+        Per-universe response (smearing) matrix. Only returned when
+        ``return_response=True``.
     """
     true_signal_df    = xsec_inputs.true_signal_df
     true_signal_scale = xsec_inputs.true_signal_scale
@@ -195,28 +185,40 @@ def get_xsec_hists(reco_df: pd.DataFrame,
     response = np.divide(smearing,sig_hist_univ,
                          out=np.zeros_like(smearing),
                          where=sig_hist_univ>0)
-    # response x cv 
+    # response x cv
     sig_reco_hists = np.einsum('ijk,j->ik', response, sig_hist_cv)
     bkg_reco_hists = np.apply_along_axis(get_hist1d,0,
                                          reco_weights[~signal_mask],
                                          reco_df[~signal_mask][reco_var_reco],
                                          bins)
-    return sig_reco_hists + bkg_reco_hists
+    hists = sig_reco_hists + bkg_reco_hists
+    if return_response:
+        return hists, response
+    return hists
 
 def get_syst_hists(reco_df: pd.DataFrame,
                    reco_var: str | tuple,
                    bins: np.ndarray,
                    scale: bool = True,
                    xsec_inputs: XSecInputs | None = None,
-                   expand:bool=False,
-                   multisim_nuniv=100) -> tuple[dict, np.ndarray]:
+                   multisim_nuniv=100,
+                   save_response: bool = False) -> tuple[dict, np.ndarray]:
     """Compute only systematic universe histograms (no covariance/correlation matrices).
+
+    Parameters
+    ----------
+    save_response : bool, optional
+        If True, store the per-universe response matrix under ``syst_dict[key]['response']``
+        for GENIE-type (xsec) systematics. Shape is ``(nbins_reco, nbins_true, nuniv)``.
+        Default False.
 
     Returns
     -------
     tuple[dict, np.ndarray]
         (syst_hist_dict, cv_hist), where:
         - syst_hist_dict[key]['hists'] has shape (nbins, nuniv)
+        - syst_hist_dict[key]['response'] has shape (nbins_reco, nbins_true, nuniv),
+          present only for xsec systematics when ``save_response=True``
         - cv_hist is the flux-normalized CV histogram
     """
     reco_df = ensure_lexsorted(reco_df, axis=0)
@@ -250,72 +252,60 @@ def get_syst_hists(reco_df: pd.DataFrame,
         print("No flux-averaged POT normalization found; flux normalization will be equal to one.")
 
     cv = get_hist1d(data=reco_df[reco_var], bins=bins, weights=scaling)
-    cv_counts = np.sum(cv)
     nbins = len(bins)
     syst_dict = {}
+    
+    # unisim
+    for col in tqdm(unisim_col, desc='Running through unisims'):
+        weights = reco_df[col].values.astype(np.float64)
+        weights[np.isnan(weights)] = 1.0
+        weights[(weights>10) | (weights < 0)] = 1.0 
+        weights *= scaling
 
-    if expand:
-        # use morph and ps1 as 1-sigma variations to create multisim universes with random throws
-        for col in tqdm(unisim_col+multisig_col, desc='Running through unisims'):
-            i_vals = np.arange(multisim_nuniv)
-            seed_strs = np.char.add(np.char.add("".join(list(col)), i_vals.astype(str)), str(id(reco_df)))
-            seed_ints = np.fromiter((hash(s) % (2**32) for s in seed_strs), dtype=np.uint32, count=len(i_vals))
-            scalars = np.array([np.random.default_rng(int(s)).normal(0, 1) for s in seed_ints], dtype=np.float64)
-
-            weights_mlt = _expand_weights(reco_df, col, multisim_nuniv, scalars=scalars)
-            weights_mlt *= scaling[:, np.newaxis]
-            if is_xsec(col, xsec_inputs):
-                true_weights_mlt = _expand_weights(
-                    xsec_inputs.true_signal_df,
-                    col[2:],
-                    multisim_nuniv,
-                    scalars=scalars,
-                ) * xsec_inputs.true_signal_scale
-                hists = get_xsec_hists(reco_df, xsec_inputs, weights_mlt, true_weights_mlt, bins, reco_var)
-            else:
-                hists = np.apply_along_axis(get_hist1d, 0, weights_mlt, reco_df[reco_var], bins)
-
-            syst_dict[col[2]] = {'hists': hists}
-    else: 
-        # unisim
-        for col in tqdm(unisim_col, desc='Running through unisims'):
-            weights = reco_df[col].values.astype(np.float64)
-            weights[np.isnan(weights)] = 1.0
-            weights[(weights>10) | (weights < 0)] = 1.0 
-            weights *= scaling
-
-            if is_xsec(col, xsec_inputs):
-                true_signal_weights = xsec_inputs.true_signal_df[col[2:]].values.astype(np.float64) * xsec_inputs.true_signal_scale
-                hists = get_xsec_hists(reco_df, xsec_inputs,
+        response = None
+        if is_xsec(col, xsec_inputs):
+            true_signal_weights = xsec_inputs.true_signal_df[col[2:]].values.astype(np.float64) * xsec_inputs.true_signal_scale
+            result = get_xsec_hists(reco_df, xsec_inputs,
                                     weights.reshape(-1, 1),
                                     true_signal_weights.reshape(-1, 1),
                                     bins,
-                                    reco_var)
-            else:
-                hists = np.apply_along_axis(get_hist1d, 0, weights, reco_df[reco_var], bins).reshape((nbins - 1, -1))
+                                    reco_var,
+                                    return_response=save_response)
+            hists, response = result if save_response else (result, None)
+        else:
+            hists = np.apply_along_axis(get_hist1d, 0, weights, reco_df[reco_var], bins).reshape((nbins - 1, -1))
 
-            syst_dict[col[2]] = {'hists': hists}
+        entry = {'hists': hists}
+        if response is not None:
+            entry['response'] = response
+        syst_dict[col[2]] = entry
 
-        # multisig (ps1/ms1 pairs)
-        for col in tqdm(multisig_col, desc='Running through multisig'):
-            ps1_col = col
-            ms1_col = tuple([x if x != "ps1" else "ms1" for x in list(col)])
+    # multisig (ps1/ms1 pairs)
+    for col in tqdm(multisig_col, desc='Running through multisig'):
+        ps1_col = col
+        ms1_col = tuple([x if x != "ps1" else "ms1" for x in list(col)])
 
-            ps1 = np.nan_to_num(reco_df[ps1_col].values.astype(np.float64), copy=False, nan=1.0)
-            ms1 = np.nan_to_num(reco_df[ms1_col].values.astype(np.float64), copy=False, nan=1.0)
-            ps1[(ps1>10) | (ps1<0)] = 1  # cap extreme outliers to avoid dominating the histograms
-            ms1[(ms1>10) | (ms1<0)] = 1
-            weights = np.stack([ps1, ms1]).T * scaling[:, np.newaxis]
-            
-            if is_xsec(col, xsec_inputs):
-                true_signal_ps1 = np.nan_to_num(xsec_inputs.true_signal_df[ps1_col[2:]].values.astype(np.float64), copy=False, nan=1.0)
-                true_signal_ms1 = np.nan_to_num(xsec_inputs.true_signal_df[ms1_col[2:]].values.astype(np.float64), copy=False, nan=1.0)
-                true_signal_weights = np.stack([true_signal_ps1, true_signal_ms1]).T * xsec_inputs.true_signal_scale
-                hists = get_xsec_hists(reco_df, xsec_inputs, weights, true_signal_weights, bins, reco_var)
-            else:
-                hists = np.apply_along_axis(get_hist1d, 0, weights, reco_df[reco_var], bins)
+        ps1 = np.nan_to_num(reco_df[ps1_col].values.astype(np.float64), copy=False, nan=1.0)
+        ms1 = np.nan_to_num(reco_df[ms1_col].values.astype(np.float64), copy=False, nan=1.0)
+        weights = np.stack([ps1, ms1]).T 
+        weights[(weights>10) | (weights < 0)] = 1.0 
+        weights *= scaling[:, np.newaxis]
+        
+        response = None
+        if is_xsec(col, xsec_inputs):
+            true_signal_ps1 = np.nan_to_num(xsec_inputs.true_signal_df[ps1_col[2:]].values.astype(np.float64), copy=False, nan=1.0)
+            true_signal_ms1 = np.nan_to_num(xsec_inputs.true_signal_df[ms1_col[2:]].values.astype(np.float64), copy=False, nan=1.0)
+            true_signal_weights = np.stack([true_signal_ps1, true_signal_ms1]).T * xsec_inputs.true_signal_scale
+            result = get_xsec_hists(reco_df, xsec_inputs, weights, true_signal_weights, bins, reco_var,
+                                    return_response=save_response)
+            hists, response = result if save_response else (result, None)
+        else:
+            hists = np.apply_along_axis(get_hist1d, 0, weights, reco_df[reco_var], bins)
 
-            syst_dict[col[2]] = {'hists': hists}
+        entry = {'hists': hists}
+        if response is not None:
+            entry['response'] = response
+        syst_dict[col[2]] = entry
 
     # multisim
     for col in tqdm(multisim_col, desc='Running through multisims'):
@@ -324,19 +314,32 @@ def get_syst_hists(reco_df: pd.DataFrame,
         weights[(weights>10) | (weights<0)] = 1
         weights *= scaling[:, np.newaxis]
 
+        response = None
         if is_xsec(col, xsec_inputs):
             true_signal_weights = xsec_inputs.true_signal_df[col[2:]].values.astype(np.float64) * xsec_inputs.true_signal_scale
-            hists = get_xsec_hists(reco_df, xsec_inputs, weights, true_signal_weights, bins, reco_var)
+            result = get_xsec_hists(reco_df, xsec_inputs, weights, true_signal_weights, bins, reco_var,
+                                    return_response=save_response)
+            hists, response = result if save_response else (result, None)
         else:
             hists = np.apply_along_axis(get_hist1d, 0, weights, reco_df[reco_var], bins)
 
-        syst_dict[col[2]] = {'hists': hists}
+        entry = {'hists': hists}
+        if response is not None:
+            entry['response'] = response
+        syst_dict[col[2]] = entry
 
     return syst_dict, cv
 
-def get_syst(*args, **kwargs) -> dict:
-    """Backward-compatible API: returns hists + cov/cov_frac/corr per systematic."""
-    syst_dict, cv = get_syst_hists(*args, **kwargs)
+def get_syst(*args, save_response: bool = False, **kwargs) -> dict:
+    """Backward-compatible API: returns hists + cov/cov_frac/corr per systematic.
+
+    Parameters
+    ----------
+    save_response : bool, optional
+        Forwarded to :func:`get_syst_hists`. When True, stores the per-universe
+        response matrix under ``syst_dict[key]['response']`` for xsec systematics.
+    """
+    syst_dict, cv = get_syst_hists(*args, save_response=save_response, **kwargs)
     
     for key in syst_dict:
         cov, cov_frac, corr = calc_matrices(syst_dict[key]['hists'], cv)
@@ -478,87 +481,129 @@ def get_detvar_systs(detvar_dict, var, bins,
     return matrices_dict
 
 
-def get_syst_df(dicts: list, cv_hist: np.ndarray) -> pd.DataFrame:
-    """Extract diagonal systematic uncertainties from covariance matrices into a DataFrame.
+# Keys that should be classified as GENIE but don't contain "GENIE" in their name.
+# Extracted keys for these get a "+" suffix to flag the special treatment.
+_GENIE_ALIASES = frozenset({"SBNNuSyst", "SuSAv2"})
+
+# Ordered list of (subcategory, substrings) for DetVar classification.
+# Checked top-to-bottom; first match wins. The calorimetry entry also
+# catches keys where "r" appears as a standalone token (recombination).
+_DETVAR_SUBCATEGORIES: list[tuple[str, list[str]]] = [
+    ("WireMod",     ["wiremod"]),
+    ("SCE",         ["sce"]),
+    ("PMT",         ["pmt"]),
+    ("calorimetry", ["ccal", "phi", "alpha", "beta90", "beta_90", "betap90","Ecorr",'yz']),
+]
+
+_CATEGORY_KEYWORDS = ["GENIE", "Flux", "MCstat", "DetVar", "Geant4"]
+
+
+def _extract_genie_key(key: str) -> str:
+    """Extract GENIE systematic key.
+    
+    For standard GENIE keys with multisigma/multisim pattern, extract text after the pattern.
+    For special cases like MECq0q3InterpWeighting, format as Model_MEC_q0binN.
     
     Parameters
     ----------
+    key : str
+        The full GENIE systematic key.
+    
+    Returns
+    -------
+    str
+        Extracted key fragment.
+    """
+    # Try extracting after multisigma_ or multisim_ pattern
+    for pattern in ["multisigma_", "multisim_"]:
+        if pattern in key:
+            return key.split(pattern, 1)[1]
+    
+    # Special handling for MECq0q3InterpWeighting keys
+    # Format: MECq0q3InterpWeighting_SuSAv2To{Model}_q0binned_MECResponse_q0bin{N}
+    if "MECq0q3InterpWeighting" in key:
+        parts = key.split("_")
+        # parts[1] contains "SuSAv2ToValenica" or "SuSAv2ToMartini" etc.
+        model = parts[1].split("To")[1]  # Extract text after "To"
+        q0_bin = parts[-1]  # Last part is "q0bin0", "q0bin1", etc.
+        return f"{model}_MEC_{q0_bin}"
+    
+    # Fallback to old behavior for unrecognized patterns
+    return "_".join(key.split("_")[4:])
+
+
+_KEY_EXTRACTORS = {
+    "GENIE":  _extract_genie_key,
+    "Flux":   lambda key: key.split("_")[0],
+    "MCstat": lambda key: key,
+    "DetVar": lambda key: "".join(key.split("_")[1:]),
+    "Geant4": lambda key: key.split("_")[1],
+}
+
+
+def _classify_category(key: str) -> str | None:
+    """Map a raw systematic key to its high-level category, or None if unknown."""
+    if any(alias in key for alias in _GENIE_ALIASES):
+        return "GENIE"
+    return next((cat for cat in _CATEGORY_KEYWORDS if cat in key), None)
+
+
+def _classify_detvar_subcategory(detvar_key: str) -> str:
+    """Map a detector variation key to its analysis subcategory."""
+    key    = detvar_key.lower()
+    tokens = key.replace("-", "_").split("_")
+    for subcategory, keywords in _DETVAR_SUBCATEGORIES:
+        if any(kw in key for kw in keywords):
+            return subcategory
+    if "r" in tokens:
+        return "calorimetry"
+    return "other"
+
+
+def get_syst_df(dicts: list, cv_hist: np.ndarray) -> pd.DataFrame:
+    """Extract diagonal systematic uncertainties from covariance matrices into a DataFrame.
+
+    Parameters
+    ----------
     dicts : list
-        List of dictionaries containing systematic covariance matrices
+        List of systematic dictionaries (each maps key → ``{'cov': ndarray, ...}``).
     cv_hist : np.ndarray
-        Central value histogram for normalization
-        
+        Central-value histogram used to convert absolute uncertainties to fractional.
+
     Returns
     -------
     pd.DataFrame
-        DataFrame with columns: key, category, unc, sum, top5
+        Columns: ``key``, ``category``, ``subcategory``, ``unc``, ``sum``, ``top5``.
+        Sorted by category then mean fractional uncertainty (descending).
+        ``top5`` flags the five largest sources per category.
     """
-    categories = ["GENIE", "Flux", "MCstat", "DetVar",'Geant4']
-
-    def classify_category(key: str) -> str | None:
-        """Map raw systematic keys to high-level categories."""
-        if ("SBNNuSyst" in key) or ("SuSAv2" in key):
-            return "GENIE"
-        return next((cat for cat in categories if cat in key), None)
-
-    def classify_detvar_subcategory(detvar_key: str) -> str:
-        """Map detector variation names to analysis subcategories."""
-        key = detvar_key.lower()
-        tokens = key.replace("-", "_").split("_")
-
-        if "wiremod" in key or "wire_mod" in key or "wire" in key:
-            return "WireMod"
-        if "sce" in key or "spacecharge" in key or "space_charge" in key:
-            return "SCE"
-        if "pmt" in key or "opdet" in key or "opdetector" in key or "light" in key:
-            return "PMT"
-        if (
-            any(tag in key for tag in ["ccal", "phi", "alpha", "beta90", "beta_90", "betap90"])
-            or "r" in tokens
-        ):
-            return "calorimetry"
-        return "other"
-    
-    # Map categories to key extraction logic
-    key_extractors = {
-        "GENIE":  lambda key: "_".join(key.split("_")[4:]),  
-        "Flux":   lambda key: key.split("_")[0],
-        "MCstat": lambda key: key,
-        "DetVar": lambda key: "".join(key.split("_")[1:]),
-        "Geant4": lambda key: key.split("_")[1],
-    }
-    
     records = []
-    
+
     for d in dicts:
-        for key in d:
-            cov = d[key]['cov']
+        for raw_key in d:
+            cov = d[raw_key]['cov']
             unc = np.sqrt(np.diag(cov)) / cv_hist
-            tot = np.sum(unc)/len(unc)
+            tot = float(np.mean(unc))
 
-            category = classify_category(key)
+            category = _classify_category(raw_key)
             if category is None:
-                print(f"Warning: category not found for key '{key}'")
+                print(f"Warning: category not found for key '{raw_key}'")
                 records.append({
-                    "key": key,
-                    "category": "Other",
-                    "subcategory": "Other",
-                    "unc": unc,
-                    "sum": tot,
+                    "key": raw_key, "category": "Other", "subcategory": "Other",
+                    "unc": unc, "sum": tot,
                 })
-            else:
-                extracted_key = key_extractors[category](key)
-                subcategory = category
-                if category == "DetVar":
-                    subcategory = classify_detvar_subcategory(extracted_key)
+                continue
 
-                records.append({
-                    "key": extracted_key,
-                    "category": category,
-                    "subcategory": subcategory,
-                    "unc": unc,
-                    "sum": tot,
-                })
-    syst_df = pd.DataFrame(records).sort_values(['category','sum'],ascending=[False,False]) 
+            extracted_key = _KEY_EXTRACTORS[category](raw_key)
+            if category == "GENIE" and any(alias in raw_key for alias in _GENIE_ALIASES):
+                extracted_key += "+"
+
+            subcategory = _classify_detvar_subcategory(extracted_key) if category == "DetVar" else category
+            records.append({
+                "key": extracted_key, "category": category, "subcategory": subcategory,
+                "unc": unc, "sum": tot,
+            })
+
+    syst_df = pd.DataFrame(records).sort_values(['category', 'sum'], ascending=[False, False])
     syst_df['top5'] = syst_df.groupby('category')['sum'].rank(method='first', ascending=False) <= 5
     return syst_df
