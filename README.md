@@ -20,16 +20,16 @@ plotting, and uncertainty studies.
 
 - `config.py`: Global paths and environment setup (cafpyana path, flux file, detvar files).
 - `constants.py`: Signal/background category dicts, physics constants, flux values.
-- `classes.py`: Core dataclasses — `VariableConfig`, `XSecInputs`, `SystematicsOutput`, `PlottingConfig`.
-- `variables.py`: Pre-built `VariableConfig` factory functions (`electron_energy`, `electron_direction`).
-- `selection.py`: Event selection and signal labeling — `select`, `select_sideband`, `define_signal`, `define_generic`.
-- `plotting.py`: MC/data plotting — `plot_var`, `plot_mc_data`, `data_plot_overlay`, `plot_syst_category_breakdown`, `plot_syst_breakdown`.
-- `funcs.py`: High-level systematics driver — `get_total_cov`, `load_detvar_dicts`, `add_uncertainty`, `add_flat_norm_uncertainty`, `add_fractional_uncertainty`.
-- `syst.py`: Low-level systematics — `get_syst`, `get_syst_hists`, `get_detvar_systs`, `calc_matrices`, `get_syst_df`, `mcstat`.
-- `histogram.py`: Histogram wrappers with overflow — `get_hist1d`, `get_hist2d`.
-- `utils.py`: DataFrame helpers — `ensure_lexsorted`, `merge_hdr`, `apply_event_mask`.
-- `io.py`: Split-HDF5 loading — `load_dfs`, `get_n_split`, `print_keys`.
-- `geometry.py`: Detector geometry — `whereTPC`.
+- `classes.py`: Core dataclasses for analysis variables, cross-section inputs, systematics results, and plot configuration.
+- `variables.py`: Pre-built analysis variable definitions (bins, column names, labels).
+- `selection.py`: Event selection pipeline and MC truth signal labeling.
+- `plotting.py`: Stacked MC, data overlay, data/MC ratio, and systematics breakdown plots.
+- `funcs.py`: High-level systematics driver — total covariance calculation and custom uncertainty helpers.
+- `syst.py`: Low-level systematics — universe histograms, covariance matrices, detector variations.
+- `histogram.py`: Histogram wrappers with overflow handling.
+- `utils.py`: DataFrame helpers for MultiIndex sorting, header merging, and event masking.
+- `io.py`: Split-HDF5 dataframe loading.
+- `geometry.py`: Detector geometry checks.
 
 ## Quickstart for a new analysis
 
