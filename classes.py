@@ -7,52 +7,26 @@ import numpy as np
 import pandas as pd
 
 class VariableConfig:
-    """
-    A configurable class for setting up unfolding variable configurations.
-    Choose a configuration using one of the provided class methods,
-    or instantiate directly with custom parameters.
+    """Configurable container for an unfolding variable.
+
+    Instantiate directly with all parameters, or use the pre-built factory
+    functions in :mod:`nueana.variables` (e.g. ``variables.electron_energy()``).
     """
     def __init__(self, var_save_name, var_plot_name, var_unit, bins, bin_labels, var_evt_reco_col, var_evt_truth_col, var_nu_col):
         self.var_save_name = var_save_name
         self.var_plot_name = var_plot_name
         self.var_unit = var_unit
         unit_suffix = f"~[{var_unit}]" if len(var_unit) > 0 else ""
-        self.var_labels = [r"$\mathrm{" + var_plot_name + unit_suffix + "}$", 
-                           r"$\mathrm{" + var_plot_name + "^{reco.}" + unit_suffix + "}$", 
+        self.var_labels = [r"$\mathrm{" + var_plot_name + unit_suffix + "}$",
+                           r"$\mathrm{" + var_plot_name + "^{reco.}" + unit_suffix + "}$",
                            r"$\mathrm{" + var_plot_name + "^{true}" + unit_suffix + "}$"]
         self.bins = bins
         self.bin_centers = (bins[:-1] + bins[1:]) / 2.
         self.bin_labels = bin_labels
+        self.bin_diff_labels = [f"{bin_labels[i]}-{bin_labels[i+1]}" for i in range(len(bin_labels)-1)]
         self.var_evt_reco_col = var_evt_reco_col
         self.var_evt_truth_col = var_evt_truth_col
         self.var_nu_col = var_nu_col
-
-
-    @classmethod
-    def electron_energy(cls):
-        return cls(
-            var_save_name="energy",
-            var_plot_name="E_{e-}",
-            var_unit="GeV",
-            bins=np.array([0.5,0.7,0.95,1.25,1.7,2.5]),
-            bin_labels =  np.array([0.5, 0.7, 0.95, 1.25, 1.7, 5]),
-            var_evt_reco_col=('primshw', 'shw', 'reco_energy'),
-            var_evt_truth_col=('slc','truth','e','genE'),
-            var_nu_col=('e','genE'),
-        )
-
-    @classmethod
-    def electron_direction(cls):
-        return cls(
-            var_save_name="direction",
-            var_plot_name="\\cos\\theta_{e-}",
-            var_unit="",
-            bins= np.array([0.5,0.6,0.75,0.85,0.925,1.0]),
-            bin_labels =  np.array([0.0  , 0.6  , 0.75 , 0.85 , 0.925, 1.   ]),
-            var_evt_reco_col=('primshw', 'shw', 'dir','z'),
-            var_evt_truth_col=('e','dir','z'),
-            var_nu_col=('e','dir','z')
-        )
 
 @dataclass(frozen=True)
 class XSecInputs:
@@ -75,10 +49,11 @@ class SystematicsOutput:
     xsec_* fields are optional; check .has_xsec before accessing them.
     """
 
-    hist_cv: np.ndarray
+    rate_hist_cv: np.ndarray
     rate_cov: np.ndarray
     rate_syst_df: pd.DataFrame
     rate_syst_dict: dict
+    xsec_hist_cv: np.ndarray | None = None
     xsec_cov: np.ndarray | None = None
     xsec_syst_df: pd.DataFrame | None = None
     xsec_syst_dict: dict | None = None
@@ -89,8 +64,38 @@ class SystematicsOutput:
         return self.xsec_cov is not None
 
 
+@dataclass
+class PlottingConfig:
+    """Style and display options for plot_var and plot_mc_data.
+
+    Pass an instance as the ``config`` argument to avoid spelling out all
+    parameters inline.  Any keyword argument passed directly to the plotting
+    function overrides the corresponding field here.
+    """
+    xlabel: str = ""
+    ylabel: str = ""
+    title: str = ""
+    counts: bool = False
+    percents: bool = False
+    scale: float = 1.0
+    normalize: bool = False
+    mult_factor: float = 1.0
+    cut_val: list[float] | None = None
+    plot_err: bool = True
+    systs: bool | np.ndarray | None = None
+    pdg: bool = False
+    pdg_col: tuple | str = 'pfp_shw_truth_p_pdg'
+    mode: bool = False
+    hatch: list[str] | None = None
+    bin_labels: list[str] | None = None
+    generic: bool = False
+    overflow: bool = True
+    legend_kwargs: dict | None = None
+
+
 __all__ = [
     'VariableConfig',
     'XSecInputs',
     'SystematicsOutput',
+    'PlottingConfig',
 ]

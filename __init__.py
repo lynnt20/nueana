@@ -11,6 +11,7 @@ from . import plotting
 from . import syst
 from . import selection
 from . import classes
+from . import variables
 from . import funcs
 
 from .constants import *
@@ -22,6 +23,7 @@ from .plotting import *
 from .syst import *
 from .selection import *
 from .classes import *
+from .variables import *
 from .funcs import *
 
 # This allows both:

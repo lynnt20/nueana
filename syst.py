@@ -13,51 +13,51 @@ import numpy as np
 import pandas as pd
 import warnings
 from tqdm import tqdm
+
+__all__ = [
+    'is_xsec',
+    'calc_matrices',
+    'get_xsec_hists',
+    'get_syst_hists',
+    'get_syst',
+    'mcstat',
+    'get_detvar_systs',
+    'get_syst_df',
+    'make_multiverse_weights',
+    'slim_multisim_weights',
+]
 from .utils import ensure_lexsorted, apply_event_mask
 from .histogram import get_hist1d, get_hist2d
 from .selection import select, define_signal
 from .classes import XSecInputs
 from .constants import integrated_flux
-
-def _expand_weights(df, col, multisim_nuniv, scalars=None):
-        weights = df[col].values.astype(np.float64)
-        isnan = np.isnan(weights)
-
-        if scalars is None:
-            i_vals = np.arange(multisim_nuniv)
-            seed_strs = np.char.add(np.char.add("".join(list(col)), i_vals.astype(str)), str(id(df)))
-            seed_ints = np.fromiter((hash(s) % (2**32) for s in seed_strs), dtype=np.uint32, count=len(i_vals))
-            scalars = np.array([np.random.default_rng(int(s)).normal(0, 1) for s in seed_ints], dtype=np.float64)
-
-        # One random throw per universe (coherent across all events).
-        weights_mlt = 1 + (weights - 1)[:, np.newaxis] * scalars[np.newaxis, :]
-        weights_mlt = np.maximum(weights_mlt, 0)
-        weights_mlt[isnan, :] = 1.0  # reset NaN weights to 1.0
-        return weights_mlt
+from makedf.geniesyst import regen_systematics, ar23p_genie_systematics
     
 def is_xsec(col: tuple, xsec_inputs: XSecInputs | None) -> bool:
     """Check if event rate calculation should be used for cross-section systematics.
-    
+
     Parameters
     ----------
     col : tuple
-        MultiIndex column name.
-    xsec : bool
-        Whether xsec mode is enabled.
-    sigdf : pd.DataFrame or None
-        Truth-level signal DataFrame.
-    var_true : tuple or None
-        True-level variable column in reco DataFrame.
-    var_sig : tuple or None
-        True-level variable column in signal DataFrame.
-    
+        MultiIndex column name. The knob name is expected at index 2
+        (e.g. ``('slc', 'truth', '<knob>', ...)``).
+    xsec_inputs : XSecInputs or None
+        Cross-section inputs containing truth-level signal dataframe, scaling,
+        and true-variable column mappings.
+
     Returns
     -------
     bool
-        True if column contains "GENIE" and all xsec parameters are provided; False otherwise.
+        True if the knob is in regen_systematics or ar23p_genie_systematics
+        and all xsec inputs are provided; False otherwise.
     """
-    return ("GENIE" in "".join(list(col)) and xsec and sigdf is not None 
-            and var_true is not None and var_sig is not None)
+    return (
+        col[2] in _XSEC_KNOBS
+        and xsec_inputs is not None
+        and xsec_inputs.true_signal_df is not None
+        and xsec_inputs.reco_var_true is not None
+        and xsec_inputs.true_var_true is not None
+    )
 
 def calc_matrices(var_arr: np.ndarray, cv: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
@@ -98,121 +98,113 @@ def calc_matrices(var_arr: np.ndarray, cv: np.ndarray) -> tuple[np.ndarray, np.n
         corr = cov / np.sqrt(np.outer(np.diag(cov),np.diag(cov)))
     return cov, cov_frac, corr
 
-def calc_matrices_explicit(var_arr,cv):
-    """Explicit (slow) implementation of calc_matrices, for validation only."""
-    
-    nbins = len(cv)
-    nuniv = len(var_arr[1])
-    print("Calculating matrices with ", nuniv, " universes and ", nbins, " bins.")
-
-    cov = np.zeros((nbins,nbins))
-    cov_frac = np.zeros((nbins,nbins))
-    corr = np.zeros((nbins,nbins))
-
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore",message="invalid value encountered in scalar divide")
-        for ivar in range(nuniv):
-            var = var_arr[:,ivar]
-            for i in range(nbins):
-                for j in range(nbins):   
-                    cov[i,j]      += (var[i] - cv[i])*(var[j] - cv[j])
-                    cov_frac[i,j] += (var[i] - cv[i])*(var[j] - cv[j]) / (cv[i]*cv[j])
-        
-        cov /= nuniv
-        cov_frac /= nuniv
-
-        for i in range(nbins):
-            for j in range(nbins):
-                corr[i,j] = cov[i,j] / (np.sqrt ( cov[i,i] )* np.sqrt( cov[j,j] ))
-    return cov, cov_frac, corr
-
-def get_evtrate(indf,sigdf,sel_weights,sig_weights,sig_scale,var, var_true, var_sig, bins): 
+def get_xsec_hists(reco_df: pd.DataFrame,
+                   xsec_inputs: XSecInputs,
+                   reco_weights: np.ndarray,
+                   true_signal_weights: np.ndarray,
+                   bins: np.ndarray,
+                   reco_var_reco: str | tuple,
+                   return_response: bool = False) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """Compute predicted event-rate histograms for cross-section systematic universes.
-    
+
     Parameters
     ----------
-    indf : pd.DataFrame
+    reco_df : pd.DataFrame
         Selected (reco-level) DataFrame. Must contain a ``signal`` column
         (0 = signal, nonzero = background) and the reco/true variable columns.
-    sigdf : pd.DataFrame
-        Truth-level signal DataFrame used for the denominator of the
-        response matrix (generated events).
-    sel_weights : np.ndarray, shape (n_selected, n_universes)
-        Per-event systematic weights for the selected sample.
-    sig_weights : np.ndarray, shape (n_signal, n_universes)
+    xsec_inputs : XSecInputs
+        Cross-section inputs with true signal dataframe, scaling, and variable mappings.
+    reco_weights : np.ndarray, shape (n_selected, n_universes)
+        Per-event systematic weights for the reco-level selected sample.
+    true_signal_weights : np.ndarray, shape (n_signal, n_universes)
         Per-event systematic weights for the truth-level signal sample.
-    sig_scale : float
-        Overall scale factor to apply to the signal weights.
-    var : tuple
-        Column key for the reco-level variable to histogram
+    reco_var_reco : tuple
+        Column key for the reco-level variable to histogram from the reco-level DataFrame.
         (e.g. ``('primshw','shw','reco_energy')``).
-    var_true : tuple
-        Column key for the true-level variable in the selected DataFrame
-        (e.g. ``('primshw','shw','truth','p','genE')``).
-    var_sig : tuple 
-        Column key for the true-level variable in the signal DataFrame 
-        (e.g. ``(`e`,`genE`)``). 
     bins : np.ndarray
         Bin edges (shared for reco and true axes). Overflow is folded into
         the last bin.
+    return_response : bool, optional
+        If True, also return the per-universe response matrix. Default False.
 
     Returns
     -------
-    np.ndarray, shape (n_bins, n_universes)
+    hists : np.ndarray, shape (n_bins, n_universes)
         Predicted reco event-rate histogram for each universe, equal to
         ``response_u @ cv_truth + bkg_u`` where ``response_u`` is the
         per-universe response matrix and ``bkg_u`` is the weighted
         background histogram.
+    response : np.ndarray, shape (n_bins_reco, n_bins_true, n_universes)
+        Per-universe response (smearing) matrix. Only returned when
+        ``return_response=True``.
     """
-    sigdf = sigdf[sigdf.signal==0]  # ensure sigdf is signal-only
-    signal_mask = indf.signal==0
+    true_signal_df    = xsec_inputs.true_signal_df
+    true_signal_scale = xsec_inputs.true_signal_scale
+    reco_var_true     = xsec_inputs.reco_var_true
+    true_var_true     = xsec_inputs.true_var_true
+    
+    true_signal_df = ensure_lexsorted(true_signal_df,axis=1)
+
+    true_signal_df = true_signal_df[true_signal_df.signal==0]  # ensure signal-only truth sample
+    signal_mask = reco_df.signal==0
     smearing = np.apply_along_axis(get_hist2d,0,
-                                   sel_weights[signal_mask],
-                                   indf[signal_mask][var],
-                                   indf[signal_mask][var_true],
+                                   reco_weights[signal_mask],
+                                   reco_df[signal_mask][reco_var_reco],
+                                   reco_df[signal_mask][reco_var_true],
                                    bins)
 
     sig_hist_univ = np.apply_along_axis(get_hist1d,0,
-                                        sig_weights,
-                                        sigdf[var_sig],bins)
-    sig_hist_cv = get_hist1d(np.ones(len(sigdf))*sig_scale,
-                              sigdf[var_sig],
+                                        true_signal_weights,
+                                        true_signal_df[true_var_true],bins)
+    sig_hist_cv = get_hist1d(np.ones(len(true_signal_df))*true_signal_scale,
+                              true_signal_df[true_var_true],
                               bins)
     
     response = np.divide(smearing,sig_hist_univ,
                          out=np.zeros_like(smearing),
                          where=sig_hist_univ>0)
-    # response x cv 
+    # response x cv
     sig_reco_hists = np.einsum('ijk,j->ik', response, sig_hist_cv)
     bkg_reco_hists = np.apply_along_axis(get_hist1d,0,
-                                         sel_weights[~signal_mask],
-                                         indf[~signal_mask][var],
+                                         reco_weights[~signal_mask],
+                                         reco_df[~signal_mask][reco_var_reco],
                                          bins)
-    return sig_reco_hists + bkg_reco_hists
+    hists = sig_reco_hists + bkg_reco_hists
+    if return_response:
+        return hists, response
+    return hists
 
-def get_syst_hists(indf: pd.DataFrame,
-                   var: str | tuple,
+def get_syst_hists(reco_df: pd.DataFrame,
+                   reco_var: str | tuple,
                    bins: np.ndarray,
                    scale: bool = True,
                    xsec_inputs: XSecInputs | None = None,
-                   expand:bool=False,
-                   multisim_nuniv=100) -> tuple[dict, np.ndarray]:
+                   multisim_nuniv=100,
+                   save_response: bool = False) -> tuple[dict, np.ndarray]:
     """Compute only systematic universe histograms (no covariance/correlation matrices).
+
+    Parameters
+    ----------
+    save_response : bool, optional
+        If True, store the per-universe response matrix under ``syst_dict[key]['response']``
+        for GENIE-type (xsec) systematics. Shape is ``(nbins_reco, nbins_true, nuniv)``.
+        Default False.
 
     Returns
     -------
     tuple[dict, np.ndarray]
         (syst_hist_dict, cv_hist), where:
         - syst_hist_dict[key]['hists'] has shape (nbins, nuniv)
+        - syst_hist_dict[key]['response'] has shape (nbins_reco, nbins_true, nuniv),
+          present only for xsec systematics when ``save_response=True``
         - cv_hist is the flux-normalized CV histogram
     """
-    indf = ensure_lexsorted(indf, axis=0)
-    indf = ensure_lexsorted(indf, axis=1)
+    reco_df = ensure_lexsorted(reco_df, axis=1)
 
     unisim_col, multisig_col, multisim_col = [], [], []
     univ_level = -1
 
-    for col in indf.columns:
+    for col in reco_df.columns:
         if "univ" in "".join(list(col)):
             for i, x in enumerate(col):
                 if str(x).startswith("univ"):
@@ -220,10 +212,10 @@ def get_syst_hists(indf: pd.DataFrame,
                     break
             break
 
-    scaling = np.ones(indf.shape[0])
-    for col in indf.columns:
+    scaling = np.ones(reco_df.shape[0])
+    for col in reco_df.columns:
         if ("flux_pot_norm" in col) and scale:
-            scaling = indf[col].values
+            scaling = reco_df[col].values
         if "morph" in col:
             unisim_col.append(tuple(filter(None, col)))
         elif "ps1" in col:
@@ -233,94 +225,98 @@ def get_syst_hists(indf: pd.DataFrame,
             if base not in multisim_col:
                 multisim_col.append(base)
 
-    if np.array_equal(scaling, np.ones(indf.shape[0])) and scale:
+    if np.array_equal(scaling, np.ones(reco_df.shape[0])) and scale:
         print("No flux-averaged POT normalization found; flux normalization will be equal to one.")
 
-    cv = get_hist1d(data=indf[var], bins=bins, weights=scaling)
-    cv_counts = np.sum(cv)
+    cv = get_hist1d(data=reco_df[reco_var], bins=bins, weights=scaling)
     nbins = len(bins)
     syst_dict = {}
+    
+    # unisim
+    for col in tqdm(unisim_col, desc='Running through unisims'):
+        weights = reco_df[col].values.astype(np.float64)
+        weights[np.isnan(weights)] = 1.0
+        weights[(weights>10) | (weights < 0)] = 1.0 
+        weights *= scaling
 
-    if expand:
-        # use morph and ps1 as 1-sigma variations to create multisim universes with random throws
-        for col in tqdm(unisim_col+multisig_col, desc='Running through unisims'):
-            i_vals = np.arange(multisim_nuniv)
-            seed_strs = np.char.add(np.char.add("".join(list(col)), i_vals.astype(str)), str(id(reco_df)))
-            seed_ints = np.fromiter((hash(s) % (2**32) for s in seed_strs), dtype=np.uint32, count=len(i_vals))
-            scalars = np.array([np.random.default_rng(int(s)).normal(0, 1) for s in seed_ints], dtype=np.float64)
-
-            weights_mlt = _expand_weights(reco_df, col, multisim_nuniv, scalars=scalars)
-            weights_mlt *= scaling[:, np.newaxis]
-            if is_xsec(col, xsec_inputs):
-                true_weights_mlt = _expand_weights(
-                    xsec_inputs.true_signal_df,
-                    col[2:],
-                    multisim_nuniv,
-                    scalars=scalars,
-                ) * xsec_inputs.true_signal_scale
-                hists = get_xsec_hists(reco_df, xsec_inputs, weights_mlt, true_weights_mlt, bins, reco_var)
-            else:
-                hists = np.apply_along_axis(get_hist1d, 0, weights_mlt, reco_df[reco_var], bins)
-
-            syst_dict[col[2]] = {'hists': hists}
-    else: 
-        # unisim
-        for col in tqdm(unisim_col, desc='Running through unisims'):
-            weights = reco_df[col].values.astype(np.float64)
-            weights[np.isnan(weights)] = 1.0
-            weights *= scaling
-
-            if is_xsec(col, xsec_inputs):
-                true_signal_weights = xsec_inputs.true_signal_df[col[2:]].values.astype(np.float64) * xsec_inputs.true_signal_scale
-                hists = get_xsec_hists(reco_df, xsec_inputs,
+        response = None
+        if is_xsec(col, xsec_inputs):
+            true_signal_weights = xsec_inputs.true_signal_df[col[2:]].values.astype(np.float64) * xsec_inputs.true_signal_scale
+            result = get_xsec_hists(reco_df, xsec_inputs,
                                     weights.reshape(-1, 1),
                                     true_signal_weights.reshape(-1, 1),
                                     bins,
-                                    reco_var)
-            else:
-                hists = np.apply_along_axis(get_hist1d, 0, weights, reco_df[reco_var], bins).reshape((nbins - 1, -1))
+                                    reco_var,
+                                    return_response=save_response)
+            hists, response = result if save_response else (result, None)
+        else:
+            hists = np.apply_along_axis(get_hist1d, 0, weights, reco_df[reco_var], bins).reshape((nbins - 1, -1))
 
-            syst_dict[col[2]] = {'hists': hists}
+        entry = {'hists': hists}
+        if response is not None:
+            entry['response'] = response
+        syst_dict[col[2]] = entry
 
-        # multisig (ps1/ms1 pairs)
-        for col in tqdm(multisig_col, desc='Running through multisig'):
-            ps1_col = col
-            ms1_col = tuple([x if x != "ps1" else "ms1" for x in list(col)])
+    # multisig (ps1/ms1 pairs)
+    for col in tqdm(multisig_col, desc='Running through multisig'):
+        ps1_col = col
+        ms1_col = tuple([x if x != "ps1" else "ms1" for x in list(col)])
 
-            ps1 = np.nan_to_num(reco_df[ps1_col].values.astype(np.float64), copy=False, nan=1.0)
-            ms1 = np.nan_to_num(reco_df[ms1_col].values.astype(np.float64), copy=False, nan=1.0)
-            weights = np.stack([ps1, ms1]).T * scaling[:, np.newaxis]
+        ps1 = np.nan_to_num(reco_df[ps1_col].values.astype(np.float64), copy=False, nan=1.0)
+        ms1 = np.nan_to_num(reco_df[ms1_col].values.astype(np.float64), copy=False, nan=1.0)
+        weights = np.stack([ps1, ms1]).T 
+        weights[(weights>10) | (weights < 0)] = 1.0 
+        weights *= scaling[:, np.newaxis]
+        
+        response = None
+        if is_xsec(col, xsec_inputs):
+            true_signal_ps1 = np.nan_to_num(xsec_inputs.true_signal_df[ps1_col[2:]].values.astype(np.float64), copy=False, nan=1.0)
+            true_signal_ms1 = np.nan_to_num(xsec_inputs.true_signal_df[ms1_col[2:]].values.astype(np.float64), copy=False, nan=1.0)
+            true_signal_weights = np.stack([true_signal_ps1, true_signal_ms1]).T * xsec_inputs.true_signal_scale
+            result = get_xsec_hists(reco_df, xsec_inputs, weights, true_signal_weights, bins, reco_var,
+                                    return_response=save_response)
+            hists, response = result if save_response else (result, None)
+        else:
+            hists = np.apply_along_axis(get_hist1d, 0, weights, reco_df[reco_var], bins)
 
-            if is_xsec(col, xsec_inputs):
-                true_signal_ps1 = np.nan_to_num(xsec_inputs.true_signal_df[ps1_col[2:]].values.astype(np.float64), copy=False, nan=1.0)
-                true_signal_ms1 = np.nan_to_num(xsec_inputs.true_signal_df[ms1_col[2:]].values.astype(np.float64), copy=False, nan=1.0)
-                true_signal_weights = np.stack([true_signal_ps1, true_signal_ms1]).T * xsec_inputs.true_signal_scale
-                hists = get_xsec_hists(reco_df, xsec_inputs, weights, true_signal_weights, bins, reco_var)
-            else:
-                hists = np.apply_along_axis(get_hist1d, 0, weights, reco_df[reco_var], bins)
-
-            syst_dict[col[2]] = {'hists': hists}
+        entry = {'hists': hists}
+        if response is not None:
+            entry['response'] = response
+        syst_dict[col[2]] = entry
 
     # multisim
     for col in tqdm(multisim_col, desc='Running through multisims'):
-        weights = indf[col].values.astype(np.float64)
+        weights = reco_df[col].values.astype(np.float64)
         weights[np.isnan(weights)] = 1.0
+        weights[(weights>10) | (weights<0)] = 1
         weights *= scaling[:, np.newaxis]
 
-        if is_xsec_rate(col, xsec, sigdf, var_true, var_sig):
-            sig_weights = sigdf[col[2:]].values.astype(np.float64) * scale_sig
-            hists = get_evtrate(indf, sigdf, weights, sig_weights, scale_sig, var, var_true, var_sig, bins)
+        response = None
+        if is_xsec(col, xsec_inputs):
+            true_signal_weights = xsec_inputs.true_signal_df[col[2:]].values.astype(np.float64) * xsec_inputs.true_signal_scale
+            result = get_xsec_hists(reco_df, xsec_inputs, weights, true_signal_weights, bins, reco_var,
+                                    return_response=save_response)
+            hists, response = result if save_response else (result, None)
         else:
-            hists = np.apply_along_axis(get_hist1d, 0, weights, indf[var], bins)
+            hists = np.apply_along_axis(get_hist1d, 0, weights, reco_df[reco_var], bins)
 
-        syst_dict[col[2]] = {'hists': hists}
+        entry = {'hists': hists}
+        if response is not None:
+            entry['response'] = response
+        syst_dict[col[2]] = entry
 
     return syst_dict, cv
 
+def get_syst(*args, save_response: bool = False, **kwargs) -> dict:
+    """Backward-compatible API: returns hists + cov/cov_frac/corr per systematic.
 
-def get_syst(*args, **kwargs) -> dict:
-    """Backward-compatible API: returns hists + cov/cov_frac/corr per systematic."""
-    syst_dict, cv = get_syst_hists(*args, **kwargs)
+    Parameters
+    ----------
+    save_response : bool, optional
+        Forwarded to :func:`get_syst_hists`. When True, stores the per-universe
+        response matrix under ``syst_dict[key]['response']`` for xsec systematics.
+    """
+    syst_dict, cv = get_syst_hists(*args, save_response=save_response, **kwargs)
     
     for key in syst_dict:
         cov, cov_frac, corr = calc_matrices(syst_dict[key]['hists'], cv)
@@ -381,157 +377,444 @@ def mcstat(indf, nuniv:int=100 , cols: list=['__ntuple','entry','rec.slc..index'
     return df.join(mcstat_univ_wgt)
 
 
-def get_detvar_systs(detvar_dict,var,bins,event_type: str | None = "all",**selection_kwargs):
+def get_detvar_systs(detvar_dict, var, bins,
+                     event_type: str | None = "all",
+                     extra_cuts=None,
+                     skip_cuts=None,
+                     **selection_kwargs):
     """Compute detector variation systematic covariance matrices.
-    
+
     Parameters
     ----------
     detvar_dict : dict
         Dictionary mapping detector variation names to dictionaries containing:
         - 'dv_df': DataFrame or list of DataFrames with detector variations
         - 'cv_df': DataFrame with central value
-        - 'flux_pot_norm': Normalization factor
-    stage : str
-        Selection stage to apply (e.g., "opening angle").
+        - 'pot': POT for flux normalization
     var : str or tuple
         Column name for the variable to histogram.
     bins : np.ndarray
         Bin edges for histogramming.
+    event_type : str or None, default 'all'
+        Event mask applied after selection (see :func:`~nueana.utils.apply_event_mask`).
+    extra_cuts : callable or list of callable, optional
+        Additional cut function(s) applied after the standard selection pipeline.
+        Each must accept a DataFrame and return a boolean mask, e.g.
+        ``lambda df: abs(df.x) > 10``. Forwarded to :func:`~nueana.selection.select`.
+    skip_cuts : list of str, optional
+        Named selection stages to skip. Forwarded to :func:`~nueana.selection.select`.
+        Valid names: ``'preselection'``, ``'flash matching'``, ``'shower energy'``,
+        ``'muon rejection'``, ``'conversion gap'``, ``'dEdx'``,
+        ``'opening angle'``, ``'shower length'``.
     **selection_kwargs
-        Additional keyword arguments forwarded to the `select` function.
+        Any other keyword arguments forwarded to :func:`~nueana.selection.select`
+        (e.g. ``min_dedx``, ``max_track_length``).
 
     Returns
     -------
     dict
         Dictionary mapping detector variation names to dictionaries containing:
-        - 'hists': Histograms per variation
-        - 'cov': Covariance matrix
-        - 'cov_frac': Fractional covariance matrix
-        - 'corr': Correlation matrix
-        - 'hist_cv': Central value histogram
+        - 'hists': per-variation histograms, shape (nbins, nuniv)
+        - 'cov': covariance matrix
+        - 'cov_frac': fractional covariance matrix
+        - 'corr': correlation matrix
+        - 'hist_cv': central-value histogram
 
     Notes
     -----
-    - If ``this_dict['dv_df']`` is a single DataFrame, the variation is treated
-      as a **unisim** (one universe).
-    - If ``this_dict['dv_df']`` is a list of DataFrames, the variation is treated
-      as a **multisim** (one universe per DataFrame).
-    - Histograms are flux-POT-normalized using ``this_dict['flux_pot_norm']``.
-      Ensure ``detvar_dict[key]['flux_pot_norm']`` is set to 1.0 if no normalization is desired.
-    - When ``normalize=True``, each DetVar histogram is area-normalized to match the CV.
+    If ``this_dict['dv_df']`` is a single DataFrame the variation is treated as
+    a unisim; if it is a list of DataFrames it is treated as a multisim.
     """
+    _needs_select = bool(selection_kwargs) or extra_cuts is not None or skip_cuts is not None
+    _sel_kw = dict(savedict=False, extra_cuts=extra_cuts, skip_cuts=skip_cuts, **selection_kwargs)
+
     matrices_dict = {}
-    for i, key in tqdm(enumerate(detvar_dict.keys())): 
+    for i, key in tqdm(enumerate(detvar_dict.keys())):
         this_dict = detvar_dict[key]
         this_dv   = this_dict['dv_df']
         this_cv   = this_dict['cv_df']
-        # this is for flux-normalizing
-        # re-normalize in case flux calculation has changed
-        this_norm = integrated_flux*(this_dict['pot']/1e6)
-        
-        # lexsort to avoid performance warning on columns 
-        # forward selection kwargs to select function
-        if selection_kwargs:
-            cv_sel = select(this_cv, savedict=False, **selection_kwargs)
-        else:
-            cv_sel = this_cv
-        cv_sel = apply_event_mask(ensure_lexsorted(cv_sel, axis=1), event_type)
-        cv_hist = get_hist1d(data=cv_sel[var],bins=bins)/this_norm
+        this_norm = integrated_flux * (this_dict['pot'] / 1e6)
 
-        # support both unisim (single df) and multisim (list of dfs)
+        cv_sel = select(this_cv, **_sel_kw) if _needs_select else this_cv
+        cv_sel = apply_event_mask(ensure_lexsorted(cv_sel, axis=1), event_type)
+        cv_hist = get_hist1d(data=cv_sel[var], bins=bins) / this_norm
+
         dv_dfs = this_dv if isinstance(this_dv, list) else [this_dv]
-        if selection_kwargs:
-            dv_dfs = [select(dv, savedict=False, **selection_kwargs) for dv in dv_dfs]
+        if _needs_select:
+            dv_dfs = [select(dv, **_sel_kw) for dv in dv_dfs]
         dv_hists = np.column_stack([
-            get_hist1d(
-                data=apply_event_mask(ensure_lexsorted(dv, axis=1),event_type)[var],bins=bins)
+            get_hist1d(data=apply_event_mask(ensure_lexsorted(dv, axis=1), event_type)[var], bins=bins)
             for dv in dv_dfs
-        ])/this_norm  # shape: (nbins, nuniv)
-        
+        ]) / this_norm
+
         cov, cov_frac, corr = calc_matrices(var_arr=dv_hists, cv=cv_hist)
-        matrices_dict[key] = {'hists': dv_hists,
-                              'cov': cov,
-                              'cov_frac': cov_frac,
-                              'corr': corr, 
-                              'hist_cv': cv_hist}
+        matrices_dict[key] = {
+            'hists':    dv_hists,
+            'cov':      cov,
+            'cov_frac': cov_frac,
+            'corr':     corr,
+            'hist_cv':  cv_hist,
+        }
     return matrices_dict
+
+
+# Keys that should be classified as GENIE but don't contain "GENIE" in their name.
+# Extracted keys for these get a "+" suffix to flag the special treatment.
+_GENIE_ALIASES = frozenset({"SBNNuSyst", "SuSAv2"})
+
+# Full set of GENIE knob names that use the xsec (event-rate) calculation path.
+_XSEC_KNOBS = frozenset(regen_systematics + ar23p_genie_systematics)
+
+# Ordered list of (subcategory, substrings) for DetVar classification.
+# Checked top-to-bottom; first match wins. The calorimetry entry also
+# catches keys where "r" appears as a standalone token (recombination).
+_DETVAR_SUBCATEGORIES: list[tuple[str, list[str]]] = [
+    ("WireMod",     ["wiremod"]),
+    ("SCE",         ["sce"]),
+    ("PMT",         ["pmt"]),
+    ("calorimetry", ["ccal", "phi", "alpha", "beta90", "beta_90", "betap90","Ecorr",'yz']),
+]
+
+_CATEGORY_KEYWORDS = ["GENIE", "Flux", "MCstat", "DetVar", "Geant4"]
+
+
+def _extract_genie_key(key: str) -> str:
+    """Extract GENIE systematic key.
+    
+    For standard GENIE keys with multisigma/multisim pattern, extract text after the pattern.
+    For special cases like MECq0q3InterpWeighting, format as Model_MEC_q0binN.
+    
+    Parameters
+    ----------
+    key : str
+        The full GENIE systematic key.
+    
+    Returns
+    -------
+    str
+        Extracted key fragment.
+    """
+    # Try extracting after multisigma_ or multisim_ pattern
+    for pattern in ["multisigma_", "multisim_"]:
+        if pattern in key:
+            return key.split(pattern, 1)[1]
+    
+    # Special handling for MECq0q3InterpWeighting keys
+    # Format: MECq0q3InterpWeighting_SuSAv2To{Model}_q0binned_MECResponse_q0bin{N}
+    if "MECq0q3InterpWeighting" in key:
+        parts = key.split("_")
+        # parts[1] contains "SuSAv2ToValenica" or "SuSAv2ToMartini" etc.
+        model = parts[1].split("To")[1]  # Extract text after "To"
+        q0_bin = parts[-1]  # Last part is "q0bin0", "q0bin1", etc.
+        return f"{model}_MEC_{q0_bin}"
+    
+    # Fallback to old behavior for unrecognized patterns
+    return "_".join(key.split("_")[4:])
+
+
+_KEY_EXTRACTORS = {
+    "GENIE":  _extract_genie_key,
+    "Flux":   lambda key: key.split("_")[0],
+    "MCstat": lambda key: key,
+    "DetVar": lambda key: "".join(key.split("_")[1:]),
+    "Geant4": lambda key: key.split("_")[1],
+}
+
+
+def _classify_category(key: str) -> str | None:
+    """Map a raw systematic key to its high-level category, or None if unknown."""
+    if any(alias in key for alias in _GENIE_ALIASES):
+        return "GENIE"
+    return next((cat for cat in _CATEGORY_KEYWORDS if cat in key), None)
+
+
+def _classify_detvar_subcategory(detvar_key: str) -> str:
+    """Map a detector variation key to its analysis subcategory."""
+    key    = detvar_key.lower()
+    tokens = key.replace("-", "_").split("_")
+    for subcategory, keywords in _DETVAR_SUBCATEGORIES:
+        if any(kw in key for kw in keywords):
+            return subcategory
+    if "r" in tokens:
+        return "calorimetry"
+    return "other"
 
 
 def get_syst_df(dicts: list, cv_hist: np.ndarray) -> pd.DataFrame:
     """Extract diagonal systematic uncertainties from covariance matrices into a DataFrame.
-    
+
     Parameters
     ----------
     dicts : list
-        List of dictionaries containing systematic covariance matrices
+        List of systematic dictionaries (each maps key → ``{'cov': ndarray, ...}``).
     cv_hist : np.ndarray
-        Central value histogram for normalization
-        
+        Central-value histogram used to convert absolute uncertainties to fractional.
+
     Returns
     -------
     pd.DataFrame
-        DataFrame with columns: key, category, unc, sum, top5
+        Columns: ``key``, ``category``, ``subcategory``, ``unc``, ``sum``, ``top5``.
+        Sorted by category then mean fractional uncertainty (descending).
+        ``top5`` flags the five largest sources per category.
     """
-    categories = ["GENIE", "Flux", "MCstat", "DetVar",'Geant4']
-
-    def classify_detvar_subcategory(detvar_key: str) -> str:
-        """Map detector variation names to analysis subcategories."""
-        key = detvar_key.lower()
-        tokens = key.replace("-", "_").split("_")
-
-        if "wiremod" in key or "wire_mod" in key or "wire" in key:
-            return "WireMod"
-        if "sce" in key or "spacecharge" in key or "space_charge" in key:
-            return "SCE"
-        if "pmt" in key or "opdet" in key or "opdetector" in key or "light" in key:
-            return "PMT"
-        if (
-            any(tag in key for tag in ["ccal", "phi", "alpha", "beta90", "beta_90", "betap90"])
-            or "r" in tokens
-        ):
-            return "calorimetry"
-        return "other"
-    
-    # Map categories to key extraction logic
-    key_extractors = {
-        "GENIE":  lambda key: "_".join(key.split("_")[4:]),  
-        "Flux":   lambda key: key.split("_")[0],
-        "MCstat": lambda key: key,
-        "DetVar": lambda key: "".join(key.split("_")[1:]),
-        "Geant4": lambda key: key.split("_")[1],
-    }
-    
     records = []
-    
+
     for d in dicts:
-        for key in d:
-            cov = d[key]['cov']
+        for raw_key in d:
+            cov = d[raw_key]['cov']
             unc = np.sqrt(np.diag(cov)) / cv_hist
-            tot = np.sum(unc)/len(unc)
+            tot = float(np.mean(unc))
 
-            category = next((cat for cat in categories if cat in key), None)            
+            category = _classify_category(raw_key)
             if category is None:
-                print(f"Warning: category not found for key '{key}'")
+                print(f"Warning: category not found for key '{raw_key}'")
                 records.append({
-                    "key": key,
-                    "category": "Other",
-                    "subcategory": "Other",
-                    "unc": unc,
-                    "sum": tot,
+                    "key": raw_key, "category": "Other", "subcategory": "Other",
+                    "unc": unc, "sum": tot,
                 })
-            else:
-                extracted_key = key_extractors[category](key)
-                subcategory = category
-                if category == "DetVar":
-                    subcategory = classify_detvar_subcategory(extracted_key)
+                continue
 
-                records.append({
-                    "key": extracted_key,
-                    "category": category,
-                    "subcategory": subcategory,
-                    "unc": unc,
-                    "sum": tot,
-                })
-    syst_df = pd.DataFrame(records).sort_values(['category','sum'],ascending=[False,False]) 
+            extracted_key = _KEY_EXTRACTORS[category](raw_key)
+            if category == "GENIE" and any(alias in raw_key for alias in _GENIE_ALIASES):
+                extracted_key += "+"
+
+            subcategory = _classify_detvar_subcategory(extracted_key) if category == "DetVar" else category
+            records.append({
+                "key": extracted_key, "category": category, "subcategory": subcategory,
+                "unc": unc, "sum": tot,
+            })
+
+    syst_df = pd.DataFrame(records).sort_values(['category', 'sum'], ascending=[False, False])
     syst_df['top5'] = syst_df.groupby('category')['sum'].rank(method='first', ascending=False) <= 5
     return syst_df
+
+def make_multiverse_weights(evtdf, knob_list, n_univs=100, evt_prefix=None, nudf=None):
+    """Expand unisim/multisigma knobs into multisim-style universe weight columns.
+
+    For each knob in ``knob_list``, converts morph (unisim) or ps1/ms1 (multisigma)
+    weights into ``n_univs`` Gaussian-sampled universe columns. When ``nudf`` is
+    provided, the same universes are generated for both DataFrames and the resulting
+    ``evtdf`` universe weights are overwritten with the values from ``nudf`` for
+    events present in both (synchronization). When ``nudf`` is omitted, only
+    ``evtdf`` is processed and synchronization is skipped.
+
+    Parameters
+    ----------
+    evtdf : pd.DataFrame
+        Event-level DataFrame with CAF-style MultiIndex columns.
+    knob_list : list of str
+        Systematic knob names to expand. Each must exist in both ``evtdf``
+        (under ``evt_prefix`` if provided) and ``nudf`` (if provided).
+    n_univs : int, optional
+        Number of universe columns to generate per knob (default 100).
+    evt_prefix : tuple, optional
+        Column-level prefix to prepend to knob names when accessing ``evtdf``
+        (e.g. ``('slc', 'truth')``). If None, knob names are used directly.
+    nudf : pd.DataFrame, optional
+        Neutrino-level DataFrame. When provided, universe weights are generated
+        for ``nudf`` as well and synchronized into ``evtdf``. Must share index
+        names with ``evtdf``.
+
+    Returns
+    -------
+    evtdf : pd.DataFrame
+        Updated event-level DataFrame with new universe columns appended.
+        Returned alone when ``nudf`` is None.
+    nudf, evtdf : tuple of pd.DataFrame
+        Both DataFrames with new universe columns, after synchronization.
+        Returned when ``nudf`` is provided.
+    """
+    def _seed(knob, i, df_idx):
+        np.random.seed(hash(knob + str(i) + str(df_idx)) % (2**32))
+
+    def _cap(wgt):
+        return np.minimum(np.maximum(wgt, 0), 10)
+
+    def _morph_wgt(base_weight):
+        return _cap(1 + (base_weight - 1) * 2 * np.abs(np.random.normal(0, 1)))
+
+    def _multisigma_wgt(sigma_weight):
+        return _cap(1 + (sigma_weight - 1) * np.random.normal(0, 1))
+
+    if nudf is not None and nudf.index.names != evtdf.index.names:
+        raise ValueError("Index names of nudf and evtdf must match.")
+
+    new_columns_nudf = {}
+    new_columns_evtdf = {}
+
+    for knob in tqdm(knob_list):
+        evt_knob_key = (evt_prefix + (knob,)) if evt_prefix else knob
+
+        ## nudf (optional)
+        if nudf is not None:
+            this_cols_nudf = nudf[knob].columns
+            if len(this_cols_nudf) == 1:  # morph
+                for i in range(n_univs):
+                    _seed(knob, i, 0)
+                    new_columns_nudf[(knob, f"univ_{i}")] = _morph_wgt(nudf[knob].morph)
+            elif len(this_cols_nudf) == 7:  # multisigma
+                for i in range(n_univs):
+                    _seed(knob, i, 0)
+                    new_columns_nudf[(knob, f"univ_{i}")] = _multisigma_wgt(nudf[knob].ps1)
+
+        ## evtdf
+        this_cols_evtdf = evtdf[evt_knob_key].columns
+        if len(this_cols_evtdf) == 1:  # morph
+            for i in range(n_univs):
+                _seed(knob, i, 1)
+                new_columns_evtdf[evt_knob_key + (f"univ_{i}",)] = _morph_wgt(evtdf[evt_knob_key].morph)
+        elif len(this_cols_evtdf) == 7:  # multisigma
+            for i in range(n_univs):
+                _seed(knob, i, 1)
+                new_columns_evtdf[evt_knob_key + (f"univ_{i}",)] = _multisigma_wgt(evtdf[evt_knob_key].ps1)
+
+    # Pad and concat evtdf new columns
+    new_cols_evtdf = pd.DataFrame(new_columns_evtdf, index=evtdf.index)
+    if len(new_cols_evtdf.columns) > 0:
+        n_levels_evt = evtdf.columns.nlevels
+        padded_cols_evt = [col + ("",) * (n_levels_evt - len(col)) for col in new_cols_evtdf.columns]
+        new_cols_evtdf.columns = pd.MultiIndex.from_tuples(padded_cols_evt, names=evtdf.columns.names)
+    evtdf = pd.concat([evtdf, new_cols_evtdf], axis=1)
+
+    if nudf is None:
+        return evtdf
+
+    # Pad and concat nudf new columns
+    new_cols_nudf = pd.DataFrame(new_columns_nudf, index=nudf.index)
+    if len(new_cols_nudf.columns) > 0:
+        n_levels_nu = nudf.columns.nlevels
+        padded_cols_nu = [col + ("",) * (n_levels_nu - len(col)) for col in new_cols_nudf.columns]
+        new_cols_nudf.columns = pd.MultiIndex.from_tuples(padded_cols_nu, names=nudf.columns.names)
+    nudf = pd.concat([nudf, new_cols_nudf], axis=1)
+
+    # Synchronize univ weights from nudf into evtdf using the shared row index
+    for knob in knob_list:
+        if "multisim" in knob:
+            continue
+        target_cols = [
+            col for col in nudf.columns
+            if knob in "_".join(list(col)) and 'univ_' in "_".join(list(col))
+        ]
+        mapped_vals = nudf[target_cols][nudf.index.isin(evtdf.index)]
+        evt_target_cols = [(evt_prefix + col) if evt_prefix else col for col in target_cols]
+        n_levels_evt = evtdf.columns.nlevels
+        evt_target_cols = [col + ("",) * (n_levels_evt - len(col)) for col in evt_target_cols]
+        if mapped_vals.isna().any().any():
+            print(f"Found NaN values in mapped_vals for knob: {knob}")
+        evtdf[evt_target_cols] = mapped_vals
+
+    return nudf, evtdf
+
+
+def slim_multisim_weights(
+    df: pd.DataFrame,
+    categories: list[str] | None = None,
+    n_univs: int = 100,
+) -> pd.DataFrame:
+    """Combine per-knob multisim universe weights into one slim set per category.
+
+    For each requested category, multiplies the per-universe weights of all multisim
+    knobs in that category together universe-index-by-universe-index, yielding one
+    combined set of ``n_univs`` universes. This mirrors the ``slim`` option in
+    cafpyana's ``getsyst.py`` and reduces column count for downstream covariance
+    calculations while preserving inter-knob correlations.
+
+    Only multisim columns (those with ``univ_*`` sub-columns) are combined.
+    Unisim (morph) and multisigma (ps1/ms1) knobs are not affected.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with CAF-style MultiIndex columns containing systematic weight
+        columns produced by cafpyana's getsyst.
+    categories : list of str, optional
+        Categories to slim. Defaults to ``['GENIE', 'Flux', 'Geant4']``.
+    n_univs : int, optional
+        Number of universes per slim category (default 100). If a knob has fewer
+        universes than ``n_univs``, the remaining slim universes are left at 1.0
+        (no contribution from that knob).
+
+    Returns
+    -------
+    pd.DataFrame
+        Input DataFrame with slim columns appended under the keys
+        ``('slc', 'truth', '<Category>_slim', 'univ_i', '', ...)``.
+        Individual knob columns are not removed.
+
+    Examples
+    --------
+    >>> df_slim = slim_multisim_weights(df, categories=['GENIE', 'Flux', 'Geant4'])
+    >>> # df_slim now has ('slc','truth','GENIE_slim','univ_0',...) etc. appended
+    >>> # Pass to get_syst as normal — category classification still works
+    >>> syst_dict = get_syst(df_slim, reco_var, bins)
+    """
+    if categories is None:
+        categories = ['GENIE', 'Flux', 'Geant4']
+
+    df = ensure_lexsorted(df, axis=1)
+    n_levels = df.columns.nlevels
+
+    # Detect which level holds the 'univ_*' token
+    univ_level = -1
+    for col in df.columns:
+        for i, x in enumerate(col):
+            if str(x).startswith("univ"):
+                univ_level = i
+                break
+        if univ_level >= 0:
+            break
+
+    if univ_level < 0:
+        return df
+
+    # Collect unique multisim bases using the same logic as get_syst_hists
+    seen: set = set()
+    multisim_bases: list = []
+    for col in df.columns:
+        if "univ" in "".join(str(c) for c in col):
+            base = tuple(filter(None, col))[:univ_level]
+            if base not in seen:
+                seen.add(base)
+                multisim_bases.append(base)
+
+    # Group bases by requested category
+    cat_bases: dict[str, list] = {cat: [] for cat in categories}
+    for base in multisim_bases:
+        knob = base[2]
+        cat = _classify_category(knob)
+        if cat in cat_bases:
+            cat_bases[cat].append(base)
+
+    new_cols: dict = {}
+    pad = ("",) * (n_levels - 4)
+
+    for cat, bases in cat_bases.items():
+        if not bases:
+            continue
+
+        slim_weights = np.ones((len(df), n_univs), dtype=np.float64)
+        for base in bases:
+            w = df[base].values.astype(np.float64)
+            w = np.nan_to_num(w, nan=1.0)
+            np.clip(w, 0, 10, out=w)
+            n = min(n_univs, w.shape[1])
+            slim_weights[:, :n] *= w[:, :n]
+
+        slim_key = ("slc", "truth", f"{cat}_slim")
+        for i in range(n_univs):
+            new_cols[slim_key + (f"univ_{i}",) + pad] = slim_weights[:, i]
+
+    if not new_cols:
+        return df
+
+    # Drop all original multisim columns that were folded into a slim category
+    slimmed_bases = {base for cat, bases in cat_bases.items() for base in bases}
+    cols_to_drop = [
+        col for col in df.columns
+        if tuple(filter(None, col))[:univ_level] in slimmed_bases
+    ]
+    df = df.drop(columns=cols_to_drop)
+
+    new_df = pd.DataFrame(new_cols, index=df.index)
+    new_df.columns = pd.MultiIndex.from_tuples(list(new_cols.keys()), names=df.columns.names)
+    return pd.concat([df, new_df], axis=1)

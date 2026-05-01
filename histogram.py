@@ -4,9 +4,11 @@ Histogram utilities with overflow handling.
 Conventions
 -----------
 - Weights must be the first argument to automatically pass it into 
-  `np.apply_along_axis` for vectorizedsystematic uncertainty calculations.
+  `np.apply_along_axis` for vectorized systematic uncertainty calculations.
 """
 import numpy as np
+
+__all__ = ['get_hist1d', 'get_hist2d']
 
 def get_hist1d(weights=None, data=None, bins=None, overflow=True, **kwargs): 
     """1D histogram with optional overflow handling.
@@ -21,8 +23,9 @@ def get_hist1d(weights=None, data=None, bins=None, overflow=True, **kwargs):
         Bin edges.
     overflow : bool, optional
         If True (default), values above bins[-1] are clipped to bins[-1] - 1e-10
-        to fold overflow into the last bin. If False, uses standard numpy histogram
-        behavior with no clipping.
+        to fold overflow into the last bin. Non-finite values are also assigned to
+        edge bins (`+/-inf` to overflow/underflow, `NaN` to overflow).
+        If False, uses standard numpy histogram behavior with no clipping.
     **kwargs
         Additional keyword arguments to pass to np.histogram().
     
@@ -34,7 +37,10 @@ def get_hist1d(weights=None, data=None, bins=None, overflow=True, **kwargs):
     if weights is None:
         weights = np.ones(len(data))
     if overflow==True:
-        clipped = np.clip(data, bins[0], bins[-1] - 1e-10)
+        cleaned = np.nan_to_num(data, nan=bins[-1] - 1e-10,
+                                posinf=bins[-1] - 1e-10,
+                                neginf=bins[0])
+        clipped = np.clip(cleaned, bins[0], bins[-1] - 1e-10)
         return np.histogram(clipped, bins=bins, weights=weights, **kwargs)[0]
     else:
         return np.histogram(data,bins=bins,weights=weights,**kwargs)[0]
@@ -54,8 +60,9 @@ def get_hist2d(weights=None, x=None, y=None, bins=None, overflow=True, **kwargs)
         Bin edges for both axes.
     overflow : bool, optional
         If True (default), values above bins[-1] are clipped to bins[-1] - 1e-10
-        on both axes to fold overflow into the last bin. If False, uses standard
-        numpy histogram behavior with no clipping.
+        on both axes to fold overflow into the last bin. Non-finite values are
+        also assigned to edge bins (`+/-inf` to overflow/underflow, `NaN` to overflow).
+        If False, uses standard numpy histogram behavior with no clipping.
     **kwargs
         Additional keyword arguments to pass to np.histogram2d().
     
@@ -64,18 +71,22 @@ def get_hist2d(weights=None, x=None, y=None, bins=None, overflow=True, **kwargs)
     np.ndarray
         2D histogram counts of shape (len(bins)-1, len(bins)-1).
     """
-    if type(bins) is list:
-        if len(bins) != 2:
-            raise ValueError("If bins is a list, it must contain exactly two arrays for x and y bin edges.")
+    if isinstance(bins, (list, tuple)) and len(bins) == 2 and not np.isscalar(bins[0]) and not np.isscalar(bins[1]):
         x_bins, y_bins = bins
     else:
         x_bins = y_bins = bins
     if weights is None:
         weights = np.ones(len(x))
     if overflow==True:
-        cy = np.clip(y, x_bins[0], x_bins[-1] - 1e-10)
-        cx = np.clip(x, y_bins[0], y_bins[-1] - 1e-10)
-        return np.histogram2d(cx, cy, bins=bins, weights=weights, **kwargs)[0]
+        cy = np.nan_to_num(y, nan=y_bins[-1] - 1e-10,
+                           posinf=y_bins[-1] - 1e-10,
+                           neginf=y_bins[0])
+        cx = np.nan_to_num(x, nan=x_bins[-1] - 1e-10,
+                           posinf=x_bins[-1] - 1e-10,
+                           neginf=x_bins[0])
+        cy = np.clip(cy, y_bins[0], y_bins[-1] - 1e-10)
+        cx = np.clip(cx, x_bins[0], x_bins[-1] - 1e-10)
+        return np.histogram2d(cx, cy, bins=[x_bins, y_bins], weights=weights, **kwargs)[0]
     else: 
-        return np.histogram2d(x, y, bins=bins, weights=weights, **kwargs)[0]
+        return np.histogram2d(x, y, bins=[x_bins, y_bins], weights=weights, **kwargs)[0]
 

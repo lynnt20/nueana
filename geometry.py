@@ -1,6 +1,8 @@
 """Detector geometry and fiducial volume definitions."""
 import numpy as np
 
+__all__ = ['whereTPC']
+
 def whereTPC(df,
              xmin=-202.20000000000002,
              xmax= 202.20000000000002,

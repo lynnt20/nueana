@@ -1,6 +1,8 @@
 """File input/output utilities for loading HDF5 data files."""
 import pandas as pd
 
+__all__ = ['get_n_split', 'print_keys', 'load_dfs']
+
 # credit for first three functions to Mun! 
 def get_n_split(file):
     """Get the number of splits in an HDF5 file.
