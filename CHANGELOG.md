@@ -7,6 +7,25 @@ top each time changes are merged that other users should know about.
 
 ## 2026-05-01 — Cross-section systematics framework, selection improvements, plotting overhaul
 
+### Bug fixes
+
+**`plot_var()` — MC stat uncertainty now detected from the covariance dictionary**
+Previously the plotting function always computed MC stat as a separate uncertainty band.
+It now scans the passed `systs` dict for an `"MCstat"` key first: if found, MC stat is
+already folded into the covariance and a single combined stat+syst band is drawn; if not
+found, a separate MC stat band is drawn alongside the systematic band. This prevents
+double-counting when `get_total_cov` has already included MC stat.
+
+**`syst.py` — GENIE/xsec knob identification no longer relies on string matching**
+Previously, whether a systematic knob followed the cross-section (response-matrix) path
+was decided by checking whether the column name contained the string `"GENIE"`. This
+misclassified knobs whose names don't include that string (e.g. `SBNNuSyst`, `SuSAv2`).
+The check now uses the authoritative lists `regen_systematics` and
+`ar23p_genie_systematics` imported directly from `cafpyana`'s `geniesyst.py`, so
+classification is exact regardless of naming convention.
+
+---
+
 ### Breaking changes
 
 **`select()` — `min_shower_length` default changed from `0.1` → `10` cm**
@@ -215,6 +234,28 @@ from nueana.utils import apply_event_mask
 df_signal_only     = apply_event_mask(df, "signal")      # signal == 0
 df_background_only = apply_event_mask(df, "background")  # signal != 0
 df_all             = apply_event_mask(df, "all")          # no filter
+```
+
+---
+
+**Data/MC ratio panel and chi-squared annotation in `plot_mc_data()`**
+
+`plot_mc_data()` now automatically draws a data/MC ratio subplot below the main stack
+and annotates the main axis with the integrated Data/MC ratio and a chi-squared
+goodness-of-fit test (using `scipy.stats.chi2` when available). Both can be suppressed:
+
+```python
+fig, ax_main, ax_sub, mc_dict = nue.plot_mc_data(
+    mc_df, data_df, var, bins,
+    annot=False,          # suppress Data/MC and chi-sq text
+    ratio_min=0.5,        # customize ratio panel y-limits
+    ratio_max=1.5,
+)
+
+# The returned mc_dict includes the chi-sq value for downstream use
+chi2  = mc_dict["chi2"]
+p_val = mc_dict["p_value"]
+ratio = mc_dict["ratio"]      # integrated Data/MC
 ```
 
 ---
