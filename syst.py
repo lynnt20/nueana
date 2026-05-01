@@ -17,38 +17,41 @@ from tqdm import tqdm
 __all__ = [
     'is_xsec',
     'calc_matrices',
-    'calc_matrices_explicit',
     'get_xsec_hists',
     'get_syst_hists',
     'get_syst',
     'mcstat',
     'get_detvar_systs',
     'get_syst_df',
+    'make_multiverse_weights',
 ]
 from .utils import ensure_lexsorted, apply_event_mask
 from .histogram import get_hist1d, get_hist2d
 from .selection import select, define_signal
 from .classes import XSecInputs
 from .constants import integrated_flux
+from makedf.geniesyst import regen_systematics, ar23p_genie_systematics
     
 def is_xsec(col: tuple, xsec_inputs: XSecInputs | None) -> bool:
     """Check if event rate calculation should be used for cross-section systematics.
-    
+
     Parameters
     ----------
     col : tuple
-        MultiIndex column name.
+        MultiIndex column name. The knob name is expected at index 2
+        (e.g. ``('slc', 'truth', '<knob>', ...)``).
     xsec_inputs : XSecInputs or None
         Cross-section inputs containing truth-level signal dataframe, scaling,
         and true-variable column mappings.
-    
+
     Returns
     -------
     bool
-        True if column contains "GENIE" and all xsec inputs are provided; False otherwise.
+        True if the knob is in regen_systematics or ar23p_genie_systematics
+        and all xsec inputs are provided; False otherwise.
     """
     return (
-        "GENIE" in "".join(list(col))
+        col[2] in _XSEC_KNOBS
         and xsec_inputs is not None
         and xsec_inputs.true_signal_df is not None
         and xsec_inputs.reco_var_true is not None
@@ -92,34 +95,6 @@ def calc_matrices(var_arr: np.ndarray, cv: np.ndarray) -> tuple[np.ndarray, np.n
         cov = (diffs @ diffs.T) / diffs.shape[1]
         cov_frac = (diffs_norm @ diffs_norm.T) / diffs_norm.shape[1]
         corr = cov / np.sqrt(np.outer(np.diag(cov),np.diag(cov)))
-    return cov, cov_frac, corr
-
-def calc_matrices_explicit(var_arr,cv):
-    """Explicit (slow) implementation of calc_matrices, for validation only."""
-    
-    nbins = len(cv)
-    nuniv = len(var_arr[1])
-    print("Calculating matrices with ", nuniv, " universes and ", nbins, " bins.")
-
-    cov = np.zeros((nbins,nbins))
-    cov_frac = np.zeros((nbins,nbins))
-    corr = np.zeros((nbins,nbins))
-
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore",message="invalid value encountered in scalar divide")
-        for ivar in range(nuniv):
-            var = var_arr[:,ivar]
-            for i in range(nbins):
-                for j in range(nbins):   
-                    cov[i,j]      += (var[i] - cv[i])*(var[j] - cv[j])
-                    cov_frac[i,j] += (var[i] - cv[i])*(var[j] - cv[j]) / (cv[i]*cv[j])
-        
-        cov /= nuniv
-        cov_frac /= nuniv
-
-        for i in range(nbins):
-            for j in range(nbins):
-                corr[i,j] = cov[i,j] / (np.sqrt ( cov[i,i] )* np.sqrt( cov[j,j] ))
     return cov, cov_frac, corr
 
 def get_xsec_hists(reco_df: pd.DataFrame,
@@ -166,6 +141,8 @@ def get_xsec_hists(reco_df: pd.DataFrame,
     true_signal_scale = xsec_inputs.true_signal_scale
     reco_var_true     = xsec_inputs.reco_var_true
     true_var_true     = xsec_inputs.true_var_true
+    
+    true_signal_df = ensure_lexsorted(true_signal_df,axis=1)
 
     true_signal_df = true_signal_df[true_signal_df.signal==0]  # ensure signal-only truth sample
     signal_mask = reco_df.signal==0
@@ -221,7 +198,6 @@ def get_syst_hists(reco_df: pd.DataFrame,
           present only for xsec systematics when ``save_response=True``
         - cv_hist is the flux-normalized CV histogram
     """
-    reco_df = ensure_lexsorted(reco_df, axis=0)
     reco_df = ensure_lexsorted(reco_df, axis=1)
 
     unisim_col, multisig_col, multisim_col = [], [], []
@@ -485,6 +461,9 @@ def get_detvar_systs(detvar_dict, var, bins,
 # Extracted keys for these get a "+" suffix to flag the special treatment.
 _GENIE_ALIASES = frozenset({"SBNNuSyst", "SuSAv2"})
 
+# Full set of GENIE knob names that use the xsec (event-rate) calculation path.
+_XSEC_KNOBS = frozenset(regen_systematics + ar23p_genie_systematics)
+
 # Ordered list of (subcategory, substrings) for DetVar classification.
 # Checked top-to-bottom; first match wins. The calorimetry entry also
 # catches keys where "r" appears as a standalone token (recombination).
@@ -607,3 +586,85 @@ def get_syst_df(dicts: list, cv_hist: np.ndarray) -> pd.DataFrame:
     syst_df = pd.DataFrame(records).sort_values(['category', 'sum'], ascending=[False, False])
     syst_df['top5'] = syst_df.groupby('category')['sum'].rank(method='first', ascending=False) <= 5
     return syst_df
+
+def make_multiverse_weights(nudf, evtdf, knob_list, n_univs=100, evt_prefix=None):
+    
+    def _seed(knob, i, df_idx):
+        np.random.seed(hash(knob + str(i) + str(df_idx)) % (2**32))
+
+    def _cap(wgt):
+        return np.minimum(np.maximum(wgt, 0), 10)
+
+    def _morph_wgt(base_weight):
+        return _cap(1 + (base_weight - 1) * 2 * np.abs(np.random.normal(0, 1)))
+
+    def _multisigma_wgt(sigma_weight):
+        return _cap(1 + (sigma_weight - 1) * np.random.normal(0, 1))
+
+    # evt_prefix: tuple of column levels to prepend to knob name in evtdf (e.g., ('slc', 'truth'))
+    new_columns_nudf = {}
+    new_columns_evtdf = {}
+    
+    if nudf.index.names != evtdf.index.names:
+        raise ValueError("Index names of nudf and evtdf must match.")
+
+    for knob in tqdm(knob_list):
+        evt_knob_key = (evt_prefix + (knob,)) if evt_prefix else knob
+
+        ## nudf
+        this_cols_nudf = nudf[knob].columns
+        if len(this_cols_nudf) == 1:  # morph
+            for i in range(n_univs):
+                _seed(knob, i, 0)
+                new_columns_nudf[(knob, f"univ_{i}")] = _morph_wgt(nudf[knob].morph)
+        elif len(this_cols_nudf) == 7:  # multisigma
+            for i in range(n_univs):
+                _seed(knob, i, 0)
+                new_columns_nudf[(knob, f"univ_{i}")] = _multisigma_wgt(nudf[knob].ps1)
+
+        ## evtdf
+        this_cols_evtdf = evtdf[evt_knob_key].columns
+        if len(this_cols_evtdf) == 1:  # morph
+            for i in range(n_univs):
+                _seed(knob, i, 1)
+                new_columns_evtdf[evt_knob_key + (f"univ_{i}",)] = _morph_wgt(evtdf[evt_knob_key].morph)
+        elif len(this_cols_evtdf) == 7:  # multisigma
+            for i in range(n_univs):
+                _seed(knob, i, 1)
+                new_columns_evtdf[evt_knob_key + (f"univ_{i}",)] = _multisigma_wgt(evtdf[evt_knob_key].ps1)
+
+    # Convert dict to DataFrame
+    new_cols_nudf = pd.DataFrame(new_columns_nudf, index=nudf.index)
+    new_cols_evtdf = pd.DataFrame(new_columns_evtdf, index=evtdf.index)
+
+    # Pad column tuples to match original MultiIndex level count
+    if len(new_cols_nudf.columns) > 0:
+        n_levels_nu = nudf.columns.nlevels
+        padded_cols_nu = [col + ("",) * (n_levels_nu - len(col)) for col in new_cols_nudf.columns]
+        new_cols_nudf.columns = pd.MultiIndex.from_tuples(padded_cols_nu, names=nudf.columns.names)
+
+    if len(new_cols_evtdf.columns) > 0:
+        n_levels_evt = evtdf.columns.nlevels
+        padded_cols_evt = [col + ("",) * (n_levels_evt - len(col)) for col in new_cols_evtdf.columns]
+        new_cols_evtdf.columns = pd.MultiIndex.from_tuples(padded_cols_evt, names=evtdf.columns.names)
+
+    nudf = pd.concat([nudf, new_cols_nudf], axis=1)
+    evtdf = pd.concat([evtdf, new_cols_evtdf], axis=1)
+
+    # Synchronize univ weights using the shared row index
+    for knob in knob_list:
+        if "multisim" in knob:
+            continue
+        target_cols = [
+            col for col in nudf.columns
+            if knob in "_".join(list(col)) and 'univ_' in "_".join(list(col))
+        ]
+        mapped_vals = nudf[target_cols][nudf.index.isin(evtdf.index)]
+        evt_target_cols = [(evt_prefix + col) if evt_prefix else col for col in target_cols]
+        n_levels_evt = evtdf.columns.nlevels
+        evt_target_cols = [col + ("",) * (n_levels_evt - len(col)) for col in evt_target_cols]
+        if mapped_vals.isna().any().any():
+            print(f"Found NaN values in mapped_vals for knob: {knob}")
+        evtdf[evt_target_cols] = mapped_vals
+
+    return nudf, evtdf
