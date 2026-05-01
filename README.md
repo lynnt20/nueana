@@ -12,123 +12,152 @@ plotting, and uncertainty studies.
 - Signal-category definitions for MC truth labeling.
 - Histogram utilities with overflow handling.
 - Plotting helpers for stacked MC, data overlays, and data/MC ratios.
-- Systematic uncertainty tools (covariance, correlation, universe handling,
-	detector-variation helpers).
+- Systematic uncertainty tools (covariance, correlation, universe handling, detector-variation helpers).
 - I/O helpers for split HDF5 dataframe files (output of cafpyana).
 - Common constants and geometry utilities.
 
 ## Package layout
 
-- `selection.py`: Event selection and signal labeling.
-	- `select`, `select_sideband`
-	- `define_signal`, `define_generic`
-- `plotting.py`: MC/data plotting utilities.
-	- `plot_var`, `plot_var_pdg`
-	- `data_plot_overlay`, `plot_mc_data`
-- `syst.py`: Systematic uncertainty utilities.
-	- `get_syst_hists`, `get_syst`
-	- `calc_matrices`, `get_detvar_systs`, `get_syst_df`
-	- `mcstat`
-- `histogram.py`: Histogram wrappers with overflow behavior.
-	- `get_hist1d`, `get_hist2d`
-- `io.py`: Split-HDF5 dataframe loading and exposure summaries.
-	- `get_n_split`, `print_keys`, `load_dfs`
-- `geometry.py`: Detector geometry checks.
-	- `whereTPC`
-- `constants.py`: Analysis dictionaries and default plotting metadata.
-- `utils.py`: DataFrame helpers.
-	- `ensure_lexsorted`
+- `config.py`: Global paths and environment setup (cafpyana path, flux file, detvar files).
+- `constants.py`: Signal/background category dicts, physics constants, flux values.
+- `classes.py`: Core dataclasses — `VariableConfig`, `XSecInputs`, `SystematicsOutput`, `PlottingConfig`.
+- `variables.py`: Pre-built `VariableConfig` factory functions (`electron_energy`, `electron_direction`).
+- `selection.py`: Event selection and signal labeling — `select`, `select_sideband`, `define_signal`, `define_generic`.
+- `plotting.py`: MC/data plotting — `plot_var`, `plot_mc_data`, `data_plot_overlay`, `plot_syst_category_breakdown`, `plot_syst_breakdown`.
+- `funcs.py`: High-level systematics driver — `get_total_cov`, `load_detvar_dicts`, `add_uncertainty`, `add_flat_norm_uncertainty`, `add_fractional_uncertainty`.
+- `syst.py`: Low-level systematics — `get_syst`, `get_syst_hists`, `get_detvar_systs`, `calc_matrices`, `get_syst_df`, `mcstat`.
+- `histogram.py`: Histogram wrappers with overflow — `get_hist1d`, `get_hist2d`.
+- `utils.py`: DataFrame helpers — `ensure_lexsorted`, `merge_hdr`, `apply_event_mask`.
+- `io.py`: Split-HDF5 loading — `load_dfs`, `get_n_split`, `print_keys`.
+- `geometry.py`: Detector geometry — `whereTPC`.
 
-## constants.py reference
+## Quickstart for a new analysis
 
-The objects in `constants.py` are used by selection/plotting/systematics code to keep
-category definitions and display metadata consistent. All signal colors, labels, and names can be user-specific. `signal_dict` will be called by the signal/background definition function in `selection.py`
+There are four things to update when adapting this package to a different signal or
+selection: the paths in `config.py`, the signal categories in `constants.py`, the
+selection cuts in `selection.py`, and the analysis variables in `variables.py`.
 
-- `signal_dict`
-	- Maps detailed analysis channels to integer IDs used in the `signal` column.
-	- Convention: ID `0` (`nueCC`) is the signal topology.
-	- Includes backgrounds such as `numuCCpi0`, `NCpi0`, `nonFV`, `dirt`, `cosmic`, and `offbeam`.
+### 1. Update paths — `config.py`
 
-- `signal_labels`
-	- Human-readable LaTeX labels corresponding to `signal_dict` order.
-	- Used in stacked MC legends (for example by `plot_var`).
+Set the paths for your environment before importing anything else:
 
-- `signal_colors`
-	- Default color palette corresponding to `signal_dict`/`signal_labels` order.
-	- Keeps category colors stable across plots.
+```python
+import nueana.config as config
 
-- `generic_dict`
-	- Coarser category mapping (`CCnu`, `NCnu`, `nonFV`, `dirt`, `cosmic`).
-	- Used when plotting/labeling with the generic categorization mode.
-
-- `generic_labels`, `generic_colors`
-	- Display labels and default colors for the generic categories.
-
-Important behavior:
-
-- Because flux is read at import time in `constants.py`, importing `nueana` requires
-	that `fluxfile` exists and is readable in the current environment.
-
-## Environment setup
-
-Most users should add `cafpyana` to their path as well. In a notebook: 
-
-```
-import nueana
-import sys
-sys.path.append("<path/to>/cafpyana")
+config.CAFPYANA_PATH  = "/path/to/your/cafpyana"
+config.FLUX_FILE      = "/path/to/your/flux.root"
+config.INTIME_FILE    = "/path/to/your/intime.df"
+config.DETVAR_DICT_SIGNAL  = "/path/to/your/detvar_signal.pkl"
+config.DETVAR_DICT_CONTROL = "/path/to/your/detvar_control.pkl"
 ```
 
-## Quick start
+> **Note:** `constants.py` reads the flux ROOT file at import time, so `FLUX_FILE`
+> must be set (or correct in `config.py`) before `import nueana` is called.
+
+### 2. Define your signal categories — `constants.py`
+
+`signal_categories` drives the integer labels written by `define_signal()` and the
+colors/labels used by `plot_var()`. Each entry needs a `"value"` (integer ID),
+`"label"` (legend text), and `"color"`. By convention, the signal topology has ID `0`.
+
+```python
+# In constants.py — replace or extend signal_categories with your own channels
+signal_categories = {
+    "mySignal":   {"value": 0,  "label": r"My Signal",  "color": "steelblue"},
+    "background1":{"value": 1,  "label": "Background 1","color": "tomato"},
+    "nonFV":      {"value": 10, "label": "Non-FV",      "color": "gray"},
+    "dirt":       {"value": 11, "label": "Dirt",        "color": "peru"},
+    "cosmic":     {"value": 12, "label": "Cosmic",      "color": "orchid"},
+    "offbeam":    {"value": 13, "label": "Off-beam",    "color": "silver"},
+}
+signal_dict = {k: v["value"] for k, v in signal_categories.items()}
+```
+
+Then update `define_signal()` in `selection.py` to assign your integer IDs.
+
+### 3. Adjust selection cuts — `selection.py`
+
+Pass cut overrides directly to `select()` without touching the source, or skip cuts
+entirely:
+
+```python
+import nueana as nue
+
+# Override individual cut thresholds
+df_sel = nue.select(df, min_shower_energy=0.3, max_track_length=150)
+
+# Skip a cut that doesn't apply to your topology
+df_sel = nue.select(df, skip_cuts=["cut_muon_rejection"])
+
+# Add a custom cut on top of the standard pipeline
+my_cut = df.primshw.shw.open_angle < 0.1
+df_sel = nue.select(df, extra_cuts=[my_cut])
+```
+
+`select()` can return all intermediate stages for cut-flow studies:
+
+```python
+stages = nue.select(df, savedict=True)
+# Keys: 'preselection', 'flash matching', 'shower energy',
+#       'muon rejection', 'conversion gap', 'dEdx',
+#       'opening angle', 'shower length', 'shower density'
+
+# Or stop at a specific stage
+df_presel = nue.select(df, stage="preselection")
+```
+
+### 4. Define your analysis variables — `variables.py`
+
+Add a factory function returning a `VariableConfig` for each variable you want to unfold:
+
+```python
+from nueana.classes import VariableConfig
+import numpy as np
+
+def my_variable() -> VariableConfig:
+    return VariableConfig(
+        var_save_name  = "my_var",
+        var_plot_name  = r"$p_T$",
+        var_unit       = "GeV",
+        bins           = np.array([0.0, 0.2, 0.5, 1.0, 2.0]),
+        bin_labels     = np.array([0.0, 0.2, 0.5, 1.0, 2.0]),
+        var_evt_reco_col   = ("primshw", "shw", "my_reco_col", "", "", ""),
+        var_evt_truth_col  = ("slc", "truth", "e", "my_truth_col"),
+        var_nu_col         = ("e", "my_truth_col"),
+    )
+```
+
+### Minimal working example
 
 ```python
 import numpy as np
 import nueana as nue
+from nueana.classes import PlottingConfig
 
-file = "/path/to/cafpyana/df.df"
-keys = ['mcnu','hdr','nuecc']
-mc_dfs= = nue.load_dfs(file,keys)
-# df_mc should be a CAF-style pandas DataFrame with expected columns.
-df_final = nue.select(mc_dfs['nuecc'], savedict=False)
+# Load CAF-derived dataframes
+mc_dfs   = nue.load_dfs("/path/to/mc.df",   ["mcnu", "hdr", "nuecc"])
+data_dfs = nue.load_dfs("/path/to/data.df", ["hdr",  "nuecc"])
 
-# Define signal labels for MC.
-df_labeled = nue.define_signal(df_final)
+# Run selection and label signal categories
+mc_df   = nue.define_signal(nue.select(mc_dfs["nuecc"],   savedict=False))
+data_df = nue.select(data_dfs["nuecc"], savedict=False)
 
-# Make a basic stacked plot.
-bins = np.linspace(0.0, 2.0, 21)
-fig, ax_main, ax_sub, _ = nue.plot_mc_data(
-		mc_df=df_labeled,
-		data_df=df_data,
-		var=("primshw", "shw", "reco_energy", "", "", ""),
-		bins=bins,
-		xlabel="Reco shower energy [GeV]",
-		title="nue candidate selection",
+# Make a stacked MC + data plot
+cfg = PlottingConfig(xlabel="Reco shower energy [GeV]", plot_err=True)
+fig, ax_main, ax_sub, mc_dict = nue.plot_mc_data(
+    mc_df=mc_df, data_df=data_df,
+    var=nue.electron_energy().var_evt_reco_col,
+    bins=nue.electron_energy().bins,
+    config=cfg,
 )
 ```
-
-## Selection stages
-
-`select(...)` can return either all intermediate stages as a dictionary(`savedict=True`) or only the
-final dataframe (`savedict=False`). Default stage names for the nueCC selection:
-
-- `preselection`
-- `flash matching`
-- `shower energy`
-- `muon rejection`
-- `conversion gap`
-- `dEdx`
-- `opening angle`
-- `shower length`
-- `shower density`
-
-Use `stage="..."` to stop at an intermediate point.
 
 ## Notes and caveats
 
 - `constants.py` reads the flux ROOT file at import time. If the file is unavailable,
-	importing `nueana.constants` (or full `nueana`) will fail.
+  importing `nueana` will fail.
 - Several utilities assume pandas MultiIndex columns with CAF-style naming.
-- Many routines expect a `signal` column to already be defined (use
-	`define_signal` or `define_generic` where appropriate).
-- Overflow behavior in histograms is enabled by default (`overflow=True`) and folds
-	values into the last bin.
+- Many routines expect a `signal` column to already be present — call `define_signal()`
+  or `define_generic()` before plotting or applying event masks.
+- Overflow is enabled by default (`overflow=True`) and folds out-of-range values into
+  the first/last bin.
