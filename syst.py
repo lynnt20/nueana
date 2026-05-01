@@ -589,7 +589,41 @@ def get_syst_df(dicts: list, cv_hist: np.ndarray) -> pd.DataFrame:
     return syst_df
 
 def make_multiverse_weights(evtdf, knob_list, n_univs=100, evt_prefix=None, nudf=None):
+    """Expand unisim/multisigma knobs into multisim-style universe weight columns.
 
+    For each knob in ``knob_list``, converts morph (unisim) or ps1/ms1 (multisigma)
+    weights into ``n_univs`` Gaussian-sampled universe columns. When ``nudf`` is
+    provided, the same universes are generated for both DataFrames and the resulting
+    ``evtdf`` universe weights are overwritten with the values from ``nudf`` for
+    events present in both (synchronization). When ``nudf`` is omitted, only
+    ``evtdf`` is processed and synchronization is skipped.
+
+    Parameters
+    ----------
+    evtdf : pd.DataFrame
+        Event-level DataFrame with CAF-style MultiIndex columns.
+    knob_list : list of str
+        Systematic knob names to expand. Each must exist in both ``evtdf``
+        (under ``evt_prefix`` if provided) and ``nudf`` (if provided).
+    n_univs : int, optional
+        Number of universe columns to generate per knob (default 100).
+    evt_prefix : tuple, optional
+        Column-level prefix to prepend to knob names when accessing ``evtdf``
+        (e.g. ``('slc', 'truth')``). If None, knob names are used directly.
+    nudf : pd.DataFrame, optional
+        Neutrino-level DataFrame. When provided, universe weights are generated
+        for ``nudf`` as well and synchronized into ``evtdf``. Must share index
+        names with ``evtdf``.
+
+    Returns
+    -------
+    evtdf : pd.DataFrame
+        Updated event-level DataFrame with new universe columns appended.
+        Returned alone when ``nudf`` is None.
+    nudf, evtdf : tuple of pd.DataFrame
+        Both DataFrames with new universe columns, after synchronization.
+        Returned when ``nudf`` is provided.
+    """
     def _seed(knob, i, df_idx):
         np.random.seed(hash(knob + str(i) + str(df_idx)) % (2**32))
 
