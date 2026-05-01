@@ -49,10 +49,11 @@ class SystematicsOutput:
     xsec_* fields are optional; check .has_xsec before accessing them.
     """
 
-    hist_cv: np.ndarray
+    rate_hist_cv: np.ndarray
     rate_cov: np.ndarray
     rate_syst_df: pd.DataFrame
     rate_syst_dict: dict
+    xsec_hist_cv: np.ndarray | None = None
     xsec_cov: np.ndarray | None = None
     xsec_syst_df: pd.DataFrame | None = None
     xsec_syst_dict: dict | None = None
