@@ -23,7 +23,15 @@ try:
 except Exception:
     chi2_dist = None
 
-__all__ = ['annotate_internal', 'plot_var', 'plot_var_pdg', 'data_plot_overlay', 'plot_mc_data']
+__all__ = [
+    'annotate_internal',
+    'plot_var',
+    'plot_var_pdg',
+    'data_plot_overlay',
+    'plot_mc_data',
+    'plot_syst_category_breakdown',
+    'plot_syst_breakdown',
+]
 
 from .constants import (signal_dict, signal_categories,
                         generic_dict, generic_categories,
@@ -32,7 +40,7 @@ from .constants import (signal_dict, signal_categories,
 from .utils import ensure_lexsorted
 from .syst import get_syst
 from .histogram import get_hist1d
-from .classes import PlottingConfig
+from .classes import PlottingConfig, VariableConfig
 
 def annotate_internal(ax):
     """Stamp 'SBND Internal' in the upper-left corner of *ax*."""
@@ -105,6 +113,9 @@ def plot_var(df: pd.DataFrame,
         Column containing the PDG code per particle (used when ``pdg=True``).
     mode : bool, default False
         Stack by GENIE interaction mode.
+    mode_col : tuple | str, default ('slc', 'truth', 'genie_mode')
+        Column containing the GENIE interaction mode values (used when
+        ``mode=True``).
     hatch : list of str, optional
         Hatch pattern per category (must match number of categories).
     bin_labels : list of str, optional
@@ -146,6 +157,7 @@ def plot_var(df: pd.DataFrame,
     pdg           = _p.get('pdg', False)
     pdg_col       = _p.get('pdg_col', 'pfp_shw_truth_p_pdg')
     mode          = _p.get('mode', False)
+    mode_col      = _p.get('mode_col', ('slc', 'truth', 'genie_mode'))
     hatch         = _p.get('hatch', None)
     bin_labels    = _p.get('bin_labels', None)
     generic       = _p.get('generic', False)
@@ -190,15 +202,15 @@ def plot_var(df: pd.DataFrame,
                                   bins=bins, overflow=overflow)
             
     elif mode:
-        this_nu    = df[df.slc.truth.genie_mode == df.slc.truth.genie_mode]
-        this_other = df[df.slc.truth.genie_mode != df.slc.truth.genie_mode]
+        this_nu    = df[df[mode_col] == df[mode_col]]
+        this_other = df[df[mode_col] != df[mode_col]]
         for i, (key, entry) in enumerate(categories.items()):
             if entry["value"] is not None:
                 this_cat = entry["value"]
-                hists[i] = get_hist1d(data=df[df.slc.truth.genie_mode==this_cat][var],
-                                      weights=df[df.slc.truth.genie_mode==this_cat]['weights_mc'] if weight else None,
+                hists[i] = get_hist1d(data=df[df[mode_col]==this_cat][var],
+                                      weights=df[df[mode_col]==this_cat]['weights_mc'] if weight else None,
                                       bins=bins, overflow=overflow)
-                this_nu = this_nu[this_nu.slc.truth.genie_mode != this_cat]
+                this_nu = this_nu[this_nu[mode_col] != this_cat]
             elif entry["filter"] == "other_nu":
                 hists[i] = get_hist1d(data=this_nu[var],
                                       weights=this_nu['weights_mc'] if weight else None,
@@ -639,3 +651,160 @@ def plot_mc_data(mc_df: pd.DataFrame,
         plt.savefig(savefig,bbox_inches='tight')
     
     return fig, ax_main, ax_sub, mc_dict
+
+
+def _combine_syst_uncertainties(syst_df: pd.DataFrame) -> np.ndarray:
+    """Combine per-row uncertainty arrays into a single per-bin band."""
+    if hasattr(syst_df, 'empty') and syst_df.empty:
+        return np.array([])
+
+    if isinstance(syst_df, pd.Series):
+        unc_values = np.stack(syst_df.to_numpy())
+    else:
+        unc_values = np.stack(syst_df['unc'].to_numpy())
+    return np.sqrt(np.sum(np.square(unc_values), axis=0))
+
+
+def plot_syst_category_breakdown(angle_syst_df: pd.DataFrame,
+                                 energy_syst_df: pd.DataFrame,
+                                 category_dict: dict,
+                                 angle_var: VariableConfig | None = None,
+                                 energy_var: VariableConfig | None = None,
+                                 region_label: str = "Signal Region",
+                                 figsize: tuple[int, int] = (10, 4)) -> tuple[plt.Figure, np.ndarray, pd.Series, pd.Series]:
+    """Plot the category-level systematics summary for angle and energy bins."""
+    if angle_var is not None:
+        angle_bins = angle_var.bins
+        angle_bin_labels = list(angle_var.bin_labels) if angle_var.bin_labels is not None else None
+    if energy_var is not None:
+        energy_bins = energy_var.bins
+        energy_bin_labels = list(energy_var.bin_labels) if energy_var.bin_labels is not None else None
+    if angle_var is None or energy_var is None:
+        raise ValueError("angle_var and energy_var must be provided")
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+    plt.subplots_adjust(wspace=0.3)
+
+    angle_cat = angle_syst_df.sort_values('sum').groupby('category')['unc'].apply(_combine_syst_uncertainties)
+    energy_cat = energy_syst_df.sort_values('sum').groupby('category')['unc'].apply(_combine_syst_uncertainties)
+
+    for category in category_dict.keys():
+        if category not in angle_cat.index:
+            continue
+        axes[1].stairs(
+            angle_cat[category] * 100,
+            angle_bins,
+            lw=1.8,
+            linestyle=category_dict[category]['line'],
+            label=category_dict[category]['label'],
+            color=category_dict[category]['color'],
+            alpha=0.8,
+        )
+        axes[0].stairs(
+            energy_cat[category] * 100,
+            energy_bins,
+            lw=1.8,
+            linestyle=category_dict[category]['line'],
+            label=category_dict[category]['label'],
+            color=category_dict[category]['color'],
+            alpha=0.8,
+        )
+
+    angle_tot = _combine_syst_uncertainties(angle_syst_df)
+    energy_tot = _combine_syst_uncertainties(energy_syst_df)
+
+    if angle_tot.size:
+        axes[1].stairs(angle_tot * 100, angle_bins, lw=2, color='black', label='Total')
+    if energy_tot.size:
+        axes[0].stairs(energy_tot * 100, energy_bins, lw=2, color='black', label='Total')
+
+    axes[1].set_xlabel(r"Leading shower direction, $\cos\theta$")
+    axes[0].set_xlabel("Leading shower energy [GeV]")
+
+    for ax in axes:
+        ax.set_ylabel("Uncertainty on the Event Rate [%]")
+        ax.set_ylim(0, 35)
+    axes[0].set_xticks(energy_bins)
+    if energy_bin_labels is not None:
+        axes[0].set_xticklabels(energy_bin_labels)
+    axes[1].set_xticks(angle_bins)
+    if angle_bin_labels is not None:
+        axes[1].set_xticklabels(angle_bin_labels)
+    axes[1].legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    for ax in axes:
+        ax.annotate(text=region_label, xy=(0.02, 0.925), xycoords='axes fraction', fontsize=11, fontweight='bold', alpha=0.5)
+
+    return fig, axes, angle_cat, energy_cat
+
+
+def plot_syst_breakdown(angle_syst_df: pd.DataFrame,
+                        energy_syst_df: pd.DataFrame,
+                        category: str,
+                        category_dict: dict,
+                        angle_var: VariableConfig | None = None,
+                        energy_var: VariableConfig | None = None,
+                        region_label: str | None = None,
+                        figsize: tuple[int, int] = (10, 4)) -> tuple[plt.Figure, np.ndarray]:
+    """Plot the per-source systematics breakdown for one category."""
+    if angle_var is not None:
+        angle_bins = angle_var.bins
+        angle_bin_labels = list(angle_var.bin_labels) if angle_var.bin_labels is not None else None
+    if energy_var is not None:
+        energy_bins = energy_var.bins
+        energy_bin_labels = list(energy_var.bin_labels) if energy_var.bin_labels is not None else None
+    if angle_var is None or energy_var is None:
+        raise ValueError("angle_var and energy_var must be provided")
+
+    this_color = category_dict[category]['color']
+    this_label = category_dict[category]['label']
+
+    this_angle_df = angle_syst_df[angle_syst_df.category == category].sort_values('sum', ascending=False)
+    this_energy_df = energy_syst_df[energy_syst_df.category == category].sort_values('sum', ascending=False)
+
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+    plt.subplots_adjust(wspace=0.3)
+
+    for _, row in this_angle_df.iterrows():
+        axes[1].stairs(
+            row.unc * 100,
+            angle_bins,
+            lw=1.5,
+            label=row.key + f" ({row['sum']:.1%})" if row.top5 else "",
+            alpha=0.5,
+        )
+    for _, row in this_energy_df.iterrows():
+        axes[0].stairs(
+            row.unc * 100,
+            energy_bins,
+            lw=1.5,
+            label=row.key + f" ({row['sum']:.1%})" if row.top5 else "",
+            alpha=0.5,
+        )
+
+    energy_tot = _combine_syst_uncertainties(this_energy_df)
+    angle_tot = _combine_syst_uncertainties(this_angle_df)
+
+    if energy_tot.size:
+        axes[0].stairs(energy_tot * 100, energy_bins, lw=2, color=this_color, label=f'Total {this_label} ({np.mean(energy_tot):.1%})')
+    if angle_tot.size:
+        axes[1].stairs(angle_tot * 100, angle_bins, lw=2, color=this_color, label=f'Total {this_label} ({np.mean(angle_tot):.1%})')
+
+    axes[0].set_xlabel("Leading shower energy [GeV]")
+    axes[1].set_xlabel(r"Leading shower direction, $\cos\theta$")
+
+    for ax in axes:
+        ax.set_ylabel("Uncertainty on the Event Rate [%]")
+        ax.set_ylim(0, 35)
+        ax.legend(title='top 5 sources', fontsize=9)
+    axes[0].set_xticks(energy_bins)
+    if energy_bin_labels is not None:
+        axes[0].set_xticklabels(energy_bin_labels)
+    axes[1].set_xticks(angle_bins)
+    if angle_bin_labels is not None:
+        axes[1].set_xticklabels(angle_bin_labels)
+
+    if region_label is not None:
+        for ax in axes:
+            ax.annotate(text=region_label, xy=(0.02, 0.925), xycoords='axes fraction', fontsize=11, fontweight='bold', alpha=0.5)
+
+    return fig, axes
