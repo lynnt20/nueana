@@ -24,6 +24,7 @@ __all__ = [
     'get_detvar_systs',
     'get_syst_df',
     'make_multiverse_weights',
+    'slim_multisim_weights',
 ]
 from .utils import ensure_lexsorted, apply_event_mask
 from .histogram import get_hist1d, get_hist2d
@@ -587,8 +588,8 @@ def get_syst_df(dicts: list, cv_hist: np.ndarray) -> pd.DataFrame:
     syst_df['top5'] = syst_df.groupby('category')['sum'].rank(method='first', ascending=False) <= 5
     return syst_df
 
-def make_multiverse_weights(nudf, evtdf, knob_list, n_univs=100, evt_prefix=None):
-    
+def make_multiverse_weights(evtdf, knob_list, n_univs=100, evt_prefix=None, nudf=None):
+
     def _seed(knob, i, df_idx):
         np.random.seed(hash(knob + str(i) + str(df_idx)) % (2**32))
 
@@ -601,26 +602,26 @@ def make_multiverse_weights(nudf, evtdf, knob_list, n_univs=100, evt_prefix=None
     def _multisigma_wgt(sigma_weight):
         return _cap(1 + (sigma_weight - 1) * np.random.normal(0, 1))
 
-    # evt_prefix: tuple of column levels to prepend to knob name in evtdf (e.g., ('slc', 'truth'))
+    if nudf is not None and nudf.index.names != evtdf.index.names:
+        raise ValueError("Index names of nudf and evtdf must match.")
+
     new_columns_nudf = {}
     new_columns_evtdf = {}
-    
-    if nudf.index.names != evtdf.index.names:
-        raise ValueError("Index names of nudf and evtdf must match.")
 
     for knob in tqdm(knob_list):
         evt_knob_key = (evt_prefix + (knob,)) if evt_prefix else knob
 
-        ## nudf
-        this_cols_nudf = nudf[knob].columns
-        if len(this_cols_nudf) == 1:  # morph
-            for i in range(n_univs):
-                _seed(knob, i, 0)
-                new_columns_nudf[(knob, f"univ_{i}")] = _morph_wgt(nudf[knob].morph)
-        elif len(this_cols_nudf) == 7:  # multisigma
-            for i in range(n_univs):
-                _seed(knob, i, 0)
-                new_columns_nudf[(knob, f"univ_{i}")] = _multisigma_wgt(nudf[knob].ps1)
+        ## nudf (optional)
+        if nudf is not None:
+            this_cols_nudf = nudf[knob].columns
+            if len(this_cols_nudf) == 1:  # morph
+                for i in range(n_univs):
+                    _seed(knob, i, 0)
+                    new_columns_nudf[(knob, f"univ_{i}")] = _morph_wgt(nudf[knob].morph)
+            elif len(this_cols_nudf) == 7:  # multisigma
+                for i in range(n_univs):
+                    _seed(knob, i, 0)
+                    new_columns_nudf[(knob, f"univ_{i}")] = _multisigma_wgt(nudf[knob].ps1)
 
         ## evtdf
         this_cols_evtdf = evtdf[evt_knob_key].columns
@@ -633,25 +634,26 @@ def make_multiverse_weights(nudf, evtdf, knob_list, n_univs=100, evt_prefix=None
                 _seed(knob, i, 1)
                 new_columns_evtdf[evt_knob_key + (f"univ_{i}",)] = _multisigma_wgt(evtdf[evt_knob_key].ps1)
 
-    # Convert dict to DataFrame
-    new_cols_nudf = pd.DataFrame(new_columns_nudf, index=nudf.index)
+    # Pad and concat evtdf new columns
     new_cols_evtdf = pd.DataFrame(new_columns_evtdf, index=evtdf.index)
-
-    # Pad column tuples to match original MultiIndex level count
-    if len(new_cols_nudf.columns) > 0:
-        n_levels_nu = nudf.columns.nlevels
-        padded_cols_nu = [col + ("",) * (n_levels_nu - len(col)) for col in new_cols_nudf.columns]
-        new_cols_nudf.columns = pd.MultiIndex.from_tuples(padded_cols_nu, names=nudf.columns.names)
-
     if len(new_cols_evtdf.columns) > 0:
         n_levels_evt = evtdf.columns.nlevels
         padded_cols_evt = [col + ("",) * (n_levels_evt - len(col)) for col in new_cols_evtdf.columns]
         new_cols_evtdf.columns = pd.MultiIndex.from_tuples(padded_cols_evt, names=evtdf.columns.names)
-
-    nudf = pd.concat([nudf, new_cols_nudf], axis=1)
     evtdf = pd.concat([evtdf, new_cols_evtdf], axis=1)
 
-    # Synchronize univ weights using the shared row index
+    if nudf is None:
+        return evtdf
+
+    # Pad and concat nudf new columns
+    new_cols_nudf = pd.DataFrame(new_columns_nudf, index=nudf.index)
+    if len(new_cols_nudf.columns) > 0:
+        n_levels_nu = nudf.columns.nlevels
+        padded_cols_nu = [col + ("",) * (n_levels_nu - len(col)) for col in new_cols_nudf.columns]
+        new_cols_nudf.columns = pd.MultiIndex.from_tuples(padded_cols_nu, names=nudf.columns.names)
+    nudf = pd.concat([nudf, new_cols_nudf], axis=1)
+
+    # Synchronize univ weights from nudf into evtdf using the shared row index
     for knob in knob_list:
         if "multisim" in knob:
             continue
@@ -668,3 +670,117 @@ def make_multiverse_weights(nudf, evtdf, knob_list, n_univs=100, evt_prefix=None
         evtdf[evt_target_cols] = mapped_vals
 
     return nudf, evtdf
+
+
+def slim_multisim_weights(
+    df: pd.DataFrame,
+    categories: list[str] | None = None,
+    n_univs: int = 100,
+) -> pd.DataFrame:
+    """Combine per-knob multisim universe weights into one slim set per category.
+
+    For each requested category, multiplies the per-universe weights of all multisim
+    knobs in that category together universe-index-by-universe-index, yielding one
+    combined set of ``n_univs`` universes. This mirrors the ``slim`` option in
+    cafpyana's ``getsyst.py`` and reduces column count for downstream covariance
+    calculations while preserving inter-knob correlations.
+
+    Only multisim columns (those with ``univ_*`` sub-columns) are combined.
+    Unisim (morph) and multisigma (ps1/ms1) knobs are not affected.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        DataFrame with CAF-style MultiIndex columns containing systematic weight
+        columns produced by cafpyana's getsyst.
+    categories : list of str, optional
+        Categories to slim. Defaults to ``['GENIE', 'Flux', 'Geant4']``.
+    n_univs : int, optional
+        Number of universes per slim category (default 100). If a knob has fewer
+        universes than ``n_univs``, the remaining slim universes are left at 1.0
+        (no contribution from that knob).
+
+    Returns
+    -------
+    pd.DataFrame
+        Input DataFrame with slim columns appended under the keys
+        ``('slc', 'truth', '<Category>_slim', 'univ_i', '', ...)``.
+        Individual knob columns are not removed.
+
+    Examples
+    --------
+    >>> df_slim = slim_multisim_weights(df, categories=['GENIE', 'Flux', 'Geant4'])
+    >>> # df_slim now has ('slc','truth','GENIE_slim','univ_0',...) etc. appended
+    >>> # Pass to get_syst as normal — category classification still works
+    >>> syst_dict = get_syst(df_slim, reco_var, bins)
+    """
+    if categories is None:
+        categories = ['GENIE', 'Flux', 'Geant4']
+
+    df = ensure_lexsorted(df, axis=1)
+    n_levels = df.columns.nlevels
+
+    # Detect which level holds the 'univ_*' token
+    univ_level = -1
+    for col in df.columns:
+        for i, x in enumerate(col):
+            if str(x).startswith("univ"):
+                univ_level = i
+                break
+        if univ_level >= 0:
+            break
+
+    if univ_level < 0:
+        return df
+
+    # Collect unique multisim bases using the same logic as get_syst_hists
+    seen: set = set()
+    multisim_bases: list = []
+    for col in df.columns:
+        if "univ" in "".join(str(c) for c in col):
+            base = tuple(filter(None, col))[:univ_level]
+            if base not in seen:
+                seen.add(base)
+                multisim_bases.append(base)
+
+    # Group bases by requested category
+    cat_bases: dict[str, list] = {cat: [] for cat in categories}
+    for base in multisim_bases:
+        knob = base[2]
+        cat = _classify_category(knob)
+        if cat in cat_bases:
+            cat_bases[cat].append(base)
+
+    new_cols: dict = {}
+    pad = ("",) * (n_levels - 4)
+
+    for cat, bases in cat_bases.items():
+        if not bases:
+            continue
+
+        slim_weights = np.ones((len(df), n_univs), dtype=np.float64)
+        for base in bases:
+            w = df[base].values.astype(np.float64)
+            w = np.nan_to_num(w, nan=1.0)
+            np.clip(w, 0, 10, out=w)
+            n = min(n_univs, w.shape[1])
+            slim_weights[:, :n] *= w[:, :n]
+
+        slim_key = ("slc", "truth", f"{cat}_slim")
+        for i in range(n_univs):
+            new_cols[slim_key + (f"univ_{i}",) + pad] = slim_weights[:, i]
+
+    if not new_cols:
+        return df
+
+    # Drop all original multisim columns that were folded into a slim category
+    slimmed_bases = {base for cat, bases in cat_bases.items() for base in bases}
+    cols_to_drop = [
+        col for col in df.columns
+        if tuple(filter(None, col))[:univ_level] in slimmed_bases
+    ]
+    df = df.drop(columns=cols_to_drop)
+
+    new_df = pd.DataFrame(new_cols, index=df.index)
+    new_df.columns = pd.MultiIndex.from_tuples(list(new_cols.keys()), names=df.columns.names)
+    return pd.concat([df, new_df], axis=1)
