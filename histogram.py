@@ -4,7 +4,7 @@ Histogram utilities with overflow handling.
 Conventions
 -----------
 - Weights must be the first argument to automatically pass it into 
-  `np.apply_along_axis` for vectorizedsystematic uncertainty calculations.
+  `np.apply_along_axis` for vectorized systematic uncertainty calculations.
 """
 import numpy as np
 
@@ -71,9 +71,7 @@ def get_hist2d(weights=None, x=None, y=None, bins=None, overflow=True, **kwargs)
     np.ndarray
         2D histogram counts of shape (len(bins)-1, len(bins)-1).
     """
-    if type(bins) is list:
-        if len(bins) != 2:
-            raise ValueError("If bins is a list, it must contain exactly two arrays for x and y bin edges.")
+    if isinstance(bins, (list, tuple)) and len(bins) == 2 and not np.isscalar(bins[0]) and not np.isscalar(bins[1]):
         x_bins, y_bins = bins
     else:
         x_bins = y_bins = bins
@@ -88,7 +86,7 @@ def get_hist2d(weights=None, x=None, y=None, bins=None, overflow=True, **kwargs)
                            neginf=x_bins[0])
         cy = np.clip(cy, y_bins[0], y_bins[-1] - 1e-10)
         cx = np.clip(cx, x_bins[0], x_bins[-1] - 1e-10)
-        return np.histogram2d(cx, cy, bins=bins, weights=weights, **kwargs)[0]
+        return np.histogram2d(cx, cy, bins=[x_bins, y_bins], weights=weights, **kwargs)[0]
     else: 
-        return np.histogram2d(x, y, bins=bins, weights=weights, **kwargs)[0]
+        return np.histogram2d(x, y, bins=[x_bins, y_bins], weights=weights, **kwargs)[0]
 
