@@ -51,8 +51,11 @@ config.DETVAR_DICT_SIGNAL  = "/path/to/your/detvar_signal.pkl"
 config.DETVAR_DICT_CONTROL = "/path/to/your/detvar_control.pkl"
 ```
 
-> **Note:** `constants.py` reads the flux ROOT file at import time, so `FLUX_FILE`
-> must be set (or correct in `config.py`) before `import nueana` is called.
+> **Note:** `INTIME_FILE`, `DETVAR_DICT_SIGNAL`, and `DETVAR_DICT_CONTROL` are only
+> used by the systematic uncertainty functions (`get_total_cov`, `get_intime_cov`,
+> `get_detvar_systs`). If you are not yet running systematics, these paths can be
+> left as-is. `FLUX_FILE` is the exception — it is read at import time by
+> `constants.py`, so it must point to a valid file before `import nueana` is called.
 
 ### 2. Define your signal categories — `constants.py`
 
