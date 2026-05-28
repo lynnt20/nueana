@@ -100,9 +100,17 @@ def calc_matrices(var_arr: np.ndarray, cv: np.ndarray) -> tuple[np.ndarray, np.n
         corr = cov / np.sqrt(np.outer(np.diag(cov),np.diag(cov)))
     return cov, cov_frac, corr
 
-def _get_xsec_hists_inner(smear_flat_idx, w_sig, truth_sig_idx, true_signal_weights,
-                           sig_hist_cv, bkg_reco_idx, w_bkg, n_bins,
-                           return_response=False):
+def _get_xsec_hists_inner(
+    smear_flat_idx: np.ndarray,
+    w_sig: np.ndarray,
+    truth_sig_idx: np.ndarray,
+    true_signal_weights: np.ndarray,
+    sig_hist_cv: np.ndarray,
+    bkg_reco_idx: np.ndarray,
+    w_bkg: np.ndarray,
+    n_bins: int,
+    return_response: bool = False,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """Core xsec histogram computation using pre-digitized indices.
 
     Called by :func:`get_xsec_hists` (single call) and by

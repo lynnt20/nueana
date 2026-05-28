@@ -45,6 +45,17 @@ from .syst import get_syst
 from .utils import get_hist1d
 from .classes import PlottingConfig, VariableConfig, SystematicsInput, SystematicsOutput
 
+def _get_weight_column(df: pd.DataFrame):
+    """Return the weights_mc column key in df (flat or MultiIndex), or None."""
+    for col in df.columns:
+        if isinstance(col, tuple):
+            if col[0] == 'weights_mc':
+                return col
+        elif col == 'weights_mc':
+            return col
+    return None
+
+
 def _clipped_minor_locator(xmin, xmax):
     """AutoMinorLocator whose ticks are clipped to [xmin, xmax].
 
@@ -69,7 +80,7 @@ def annotate_sbnd(ax, internal=True):
     ax.annotate(label, xy=(0.0, 1.02), xycoords='axes fraction', ha='left', color='gray', fontweight='bold')
     # ax.annotate("GENIE v3.40 AR23_00i_00_000", xy=(1.0, 1.02), xycoords='axes fraction', ha='right', color='gray')
 
-def plot_var(df: pd.DataFrame,
+def plot_var(indf: pd.DataFrame,
              var: tuple | str,
              bins: np.ndarray,
              ax = None,
@@ -90,7 +101,7 @@ def plot_var(df: pd.DataFrame,
 
     Parameters
     ----------
-    df : pandas.DataFrame
+    indf : pandas.DataFrame
         Input dataframe.
     var : tuple | str
         Column name (or multi-index tuple) to histogram.
@@ -171,39 +182,35 @@ def plot_var(df: pd.DataFrame,
     """
     _p = {f.name: getattr(config, f.name) for f in _dc_fields(config)} if config is not None else {}
     _p.update(kwargs)
-    xlabel        = _p.get('xlabel', '')
-    ylabel        = _p.get('ylabel', '')
-    title         = _p.get('title', '')
-    counts        = _p.get('counts', False)
-    percents      = _p.get('percents', False)
-    scale         = _p.get('scale', 1.0)
-    normalize     = _p.get('normalize', False)
-    mult_factor   = _p.get('mult_factor', 1.0)
-    cut_val       = _p.get('cut_val', None)
-    plot_err      = _p.get('plot_err', True)
-    systs         = _p.get('systs', None)
-    pdg           = _p.get('pdg', False)
-    pdg_col       = _p.get('pdg_col', 'pfp_shw_truth_p_pdg')
-    mode          = _p.get('mode', False)
-    mode_col      = _p.get('mode_col', ('slc', 'truth', 'genie_mode'))
-    hatch         = _p.get('hatch', None)
-    bin_labels    = _p.get('bin_labels', None)
-    overflow      = _p.get('overflow', True)
-    legend_kwargs = _p.get('legend_kwargs', None)
-    internal      = _p.get('internal', True)
-    custom_cats   = _p.get('categories', None)
-    if isinstance(df, pd.DataFrame):
-        df = ensure_lexsorted(df, axis=0)
-        df = ensure_lexsorted(df, axis=1)
-    
-    weight = False
-    for col in df.columns:
-        if "weights_mc" in "".join(list(col)):
-          weight=True
-          break
-    
+    xlabel          = _p.get('xlabel', '')
+    ylabel          = _p.get('ylabel', '')
+    title           = _p.get('title', '')
+    counts          = _p.get('counts', False)
+    percents        = _p.get('percents', False)
+    scale           = _p.get('scale', 1.0)
+    normalize       = _p.get('normalize', False)
+    mult_factor     = _p.get('mult_factor', 1.0)
+    cut_val         = _p.get('cut_val', None)
+    plot_err        = _p.get('plot_err', True)
+    systs           = _p.get('systs', None)
+    pdg             = _p.get('pdg', False)
+    pdg_col         = _p.get('pdg_col', 'pfp_shw_truth_p_pdg')
+    mode            = _p.get('mode', False)
+    mode_col        = _p.get('mode_col', ('slc', 'truth', 'genie_mode'))
+    hatch           = _p.get('hatch', None)
+    bin_labels      = _p.get('bin_labels', None)
+    overflow        = _p.get('overflow', True)
+    legend_kwargs   = _p.get('legend_kwargs', None)
+    internal        = _p.get('internal', True)
+    categories_kwarg = _p.get('categories', None)
+    if isinstance(indf, pd.DataFrame):
+        indf = ensure_lexsorted(indf, axis=0)
+        indf = ensure_lexsorted(indf, axis=1)
+
+    _weight_col = _get_weight_column(indf)
+
     if ax is None: ax = plt.gca()
-    if custom_cats is not None: categories = custom_cats
+    if categories_kwarg is not None: categories = categories_kwarg
     elif pdg:      categories = pdg_categories
     elif mode:     categories = mode_categories
     else:          categories = signal_categories
@@ -223,43 +230,43 @@ def plot_var(df: pd.DataFrame,
     if (pdg==False) & (mode==False):
         for i, (key, entry) in enumerate(categories.items()):
             vals = entry["values"] if "values" in entry else [entry["value"]]
-            mask = df.signal.isin(vals)
-            hists[i] = get_hist1d(data=df[mask][var],
-                                  weights=df[mask]['weights_mc'] if weight else None,
+            mask = indf.signal.isin(vals)
+            hists[i] = get_hist1d(data=indf[mask][var],
+                                  weights=indf[mask][_weight_col] if _weight_col is not None else None,
                                   bins=bins, overflow=overflow)
-            
+
     elif mode:
-        this_nu    = df[df[mode_col] == df[mode_col]]
-        this_other = df[df[mode_col] != df[mode_col]]
+        this_nu    = indf[indf[mode_col] == indf[mode_col]]
+        this_other = indf[indf[mode_col] != indf[mode_col]]
         for i, (key, entry) in enumerate(categories.items()):
             if entry["value"] is not None:
                 this_cat = entry["value"]
-                hists[i] = get_hist1d(data=df[df[mode_col]==this_cat][var],
-                                      weights=df[df[mode_col]==this_cat]['weights_mc'] if weight else None,
+                hists[i] = get_hist1d(data=indf[indf[mode_col]==this_cat][var],
+                                      weights=indf[indf[mode_col]==this_cat][_weight_col] if _weight_col is not None else None,
                                       bins=bins, overflow=overflow)
                 this_nu = this_nu[this_nu[mode_col] != this_cat]
             elif entry["filter"] == "other_nu":
                 hists[i] = get_hist1d(data=this_nu[var],
-                                      weights=this_nu['weights_mc'] if weight else None,
+                                      weights=this_nu[_weight_col] if _weight_col is not None else None,
                                       bins=bins, overflow=overflow)
             elif entry["filter"] == "non_nu":
                 hists[i] = get_hist1d(data=this_other[var],
-                                      weights=this_other['weights_mc'] if weight else None,
+                                      weights=this_other[_weight_col] if _weight_col is not None else None,
                                       bins=bins, overflow=overflow)
     else:
-        process_col = tuple(list(pdg_col)[:-1] + ['start_process']) 
+        process_col = tuple(list(pdg_col)[:-1] + ['start_process'])
         # other_df stores any particles that we don't specify the pdg of
-        this_nu_df      = df[df.signal <  signal_dict['cosmic']]#.sort_index()
-        this_cosmic_df  = df[df.signal == signal_dict['cosmic']]#.sort_index()
-        this_offbeam_df = df[df.signal == signal_dict['offbeam']]#.sort_index()
+        this_nu_df      = indf[indf.signal <  signal_dict['cosmic']]#.sort_index()
+        this_cosmic_df  = indf[indf.signal == signal_dict['cosmic']]#.sort_index()
+        this_offbeam_df = indf[indf.signal == signal_dict['offbeam']]#.sort_index()
         # really only want to see electrons that are
         # primaries from a FV neutrino interaction
-        where_notprim = ((abs(this_nu_df[pdg_col])==11) & 
-                          (this_nu_df[process_col] != 0)) 
+        where_notprim = ((abs(this_nu_df[pdg_col])==11) &
+                          (this_nu_df[process_col] != 0))
         this_notprim_df   = this_nu_df[where_notprim]
         this_nu_df         = this_nu_df[~where_notprim]
         this_other         = this_nu_df.copy()
-        
+
         _pdg_populations = {
             "notprim": this_notprim_df,
             "cosmic":   this_cosmic_df,
@@ -270,7 +277,7 @@ def plot_var(df: pd.DataFrame,
                 pdg_value = entry["pdg"]
                 pdg_df = this_nu_df[abs(this_nu_df[pdg_col])==pdg_value].sort_index()
                 hists[i] = get_hist1d(data=pdg_df[var],
-                                      weights=pdg_df['weights_mc'] if weight else None,
+                                      weights=pdg_df[_weight_col] if _weight_col is not None else None,
                                       bins=bins, overflow=overflow)
                 this_other = this_other[abs(this_other[pdg_col])!=pdg_value]
             else:
@@ -278,14 +285,14 @@ def plot_var(df: pd.DataFrame,
                 pop = _pdg_populations.get(filt, this_other if filt == "other_nu" else None)
                 if pop is not None and len(pop) != 0:
                     hists[i] = get_hist1d(data=pop[var],
-                                          weights=pop['weights_mc'] if weight else None,
+                                          weights=pop[_weight_col] if _weight_col is not None else None,
                                           bins=bins, overflow=overflow)
     
     # Verify every row in df contributed to exactly one category bin.
     # Mismatched filter keys, unhandled signal values, or accidental row drops
     # will show up here before they silently skew the ratio or chi-sq.
-    _expected_total = get_hist1d(data=df[var],
-                                 weights=df['weights_mc'] if weight else None,
+    _expected_total = get_hist1d(data=indf[var],
+                                 weights=indf[_weight_col] if _weight_col is not None else None,
                                  bins=bins, overflow=overflow)
     _actual_total = np.sum(hists, axis=0)
     if np.sum(_expected_total) > 0 and not np.isclose(
@@ -330,7 +337,7 @@ def plot_var(df: pd.DataFrame,
     if isinstance(systs, SystematicsInput) or type(systs).__name__ == 'SystematicsInput':
         # Case 1: call get_total_cov on-the-fly with the bundled parameters.
         from .funcs import get_total_cov
-        _output = get_total_cov(reco_df=df, reco_var=var, bins=bins, **systs.to_kwargs())
+        _output = get_total_cov(reco_df=indf, reco_var=var, bins=bins, **systs.to_kwargs())
         _hist_scale = integrated_flux * (systs.mcbnb_pot/1e6)
         total_cov, systs_arr, syst_dict, calc_separate_mcstat = _apply_syst_output(_output, _hist_scale)
 
@@ -343,14 +350,14 @@ def plot_var(df: pd.DataFrame,
 
     elif systs is True:
         # Case 3: inherit systematics from universe columns in the dataframe.
-        found_systs = any("univ_" in "_".join(list(col)) for col in df.columns)
+        found_systs = any("univ_" in "_".join(list(col)) for col in indf.columns)
         if not found_systs:
             print("systs=True but no universe columns found; computing stat error only")
             syst_dict = {}
             systs_arr = np.zeros(len(bins)-1)
             calc_separate_mcstat = True
         else:
-            syst_dict = get_syst(reco_df=df, reco_var=var, bins=bins, scale=False)
+            syst_dict = get_syst(reco_df=indf, reco_var=var, bins=bins, scale=False)
             has_mcstat = any(str(k).lower() == 'mcstat' for k in syst_dict)
             for key in syst_dict:
                 total_cov += syst_dict[key]['cov']
@@ -366,8 +373,8 @@ def plot_var(df: pd.DataFrame,
     # MC stat variance — added when not already folded into the syst covariance.
     # For weighted MC the per-bin variance is sum(w^2); unweighted reduces to Poisson N.
     if calc_separate_mcstat:
-        stats_var = get_hist1d(data=df[var],
-                               weights=np.square(df['weights_mc']) if weight else None,
+        stats_var = get_hist1d(data=indf[var],
+                               weights=np.square(indf[_weight_col]) if _weight_col is not None else None,
                                bins=bins, overflow=overflow)
         stats_err = np.sqrt(stats_var) * scale
         total_cov += np.diag(stats_var)
@@ -591,7 +598,7 @@ def plot_mc_data(mc_df: pd.DataFrame,
     ax_sub = fig.add_subplot(gs[1], sharex=ax_main)
 
     data_args = dict(df=data_df, var=var, bins=bins, ax=ax_main, normalize=_p.get('normalize', False), overflow=_p.get('overflow', True))
-    mc_args   = dict(df=mc_df, var=var, bins=bins, ax=ax_main, config=config, **kwargs)
+    mc_args   = dict(indf=mc_df, var=var, bins=bins, ax=ax_main, config=config, **kwargs)
 
     data_hist, data_err, data_plot = data_plot_overlay(**data_args)
     mc_bins, mc_steps, mc_err, mc_dict = plot_var(**mc_args)

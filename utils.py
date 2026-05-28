@@ -98,7 +98,9 @@ def apply_event_mask(df: pd.DataFrame, event_mask: str | None = None) -> pd.Data
     if event_mask is None:
         event_mask = "all"
     if event_mask not in {"all", "signal", "background"}:
-        raise ValueError("event_mask must be one of: 'all', 'signal', 'background', or None")
+        raise ValueError(
+            f"event_mask={event_mask!r} is not valid. Choose from: 'all', 'signal', 'background', or None"
+        )
     
     # Apply: filter based on signal column (0 = signal, nonzero = background)
     if event_mask == "signal":

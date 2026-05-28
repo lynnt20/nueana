@@ -62,14 +62,14 @@ def _sum_covariances_from_dicts(syst_dicts, n_bins):
     return total_cov
 
 
-def _collect_rate_systs(sorted_df, reco_var, bins, mcbnb_pot, rate_hist_cv):
-    syst_dict = get_syst(reco_df=sorted_df, reco_var=reco_var, bins=bins, mcbnb_pot=mcbnb_pot)
+def _collect_rate_systs(indf, reco_var, bins, mcbnb_pot, rate_hist_cv):
+    syst_dict = get_syst(reco_df=indf, reco_var=reco_var, bins=bins, mcbnb_pot=mcbnb_pot)
     total_cov = _sum_covariances_from_dicts([syst_dict], rate_hist_cv.size)
     return syst_dict, total_cov, get_syst_df([syst_dict], rate_hist_cv)
 
 
-def _collect_xsec_systs(sorted_df, reco_var, bins, mcbnb_pot, xsec_hist_cv, xsec_inputs):
-    syst_dict = get_syst(reco_df=sorted_df, reco_var=reco_var, bins=bins, mcbnb_pot=mcbnb_pot, xsec_inputs=xsec_inputs)
+def _collect_xsec_systs(indf, reco_var, bins, mcbnb_pot, xsec_hist_cv, xsec_inputs):
+    syst_dict = get_syst(reco_df=indf, reco_var=reco_var, bins=bins, mcbnb_pot=mcbnb_pot, xsec_inputs=xsec_inputs)
     total_cov = _sum_covariances_from_dicts([syst_dict], xsec_hist_cv.size)
     return syst_dict, total_cov, get_syst_df([syst_dict], xsec_hist_cv)
 
