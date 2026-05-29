@@ -19,6 +19,7 @@ from . import config
 __all__ = [
     'get_corr_from_cov',
     'get_fractional_covariance',
+    'chi_squared',
     'add_uncertainty',
     'add_fractional_uncertainty',
     'get_intime_cov',
@@ -52,6 +53,24 @@ def get_fractional_covariance(cov, rate_hist_cv):
         where=denom > 0
     )
     return frac_cov
+
+
+def chi_squared(diff: np.ndarray, cov: np.ndarray) -> float:
+    """Chi-squared statistic from a residual vector and covariance matrix.
+
+    Parameters
+    ----------
+    diff : np.ndarray, shape (n,)
+        Residual vector (e.g. smeared_prediction − unfolded, or cv − data).
+    cov : np.ndarray, shape (n, n)
+        Full covariance matrix. Must be invertible; raises LinAlgError otherwise.
+
+    Returns
+    -------
+    float
+        chi^2 = diff^T @ inv(cov) @ diff
+    """
+    return float(diff @ np.linalg.inv(cov) @ diff)
 
 
 def _sum_covariances_from_dicts(syst_dicts, n_bins):

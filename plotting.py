@@ -26,6 +26,7 @@ except Exception:
 
 __all__ = [
     'annotate_sbnd',
+    'annotate_chisq',
     'plot_var',
     'plot_var_pdg',
     'data_plot_overlay',
@@ -79,6 +80,48 @@ def annotate_sbnd(ax, internal=True):
     label = "SBND Internal" if internal else "SBND Analysis In Progress"
     ax.annotate(label, xy=(0.0, 1.02), xycoords='axes fraction', ha='left', color='gray', fontweight='bold')
     # ax.annotate("GENIE v3.40 AR23_00i_00_000", xy=(1.0, 1.02), xycoords='axes fraction', ha='right', color='gray')
+
+
+def annotate_chisq(
+    ax,
+    chisq: float,
+    ndof: int,
+    xy: tuple = (0.98, 0.02),
+    xycoords='axes fraction',
+    ha: str = 'right',
+    va: str = 'top',
+    **kwargs,
+) -> None:
+    """Annotate an axes with a chi^2/ndof and p-value label.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+    chisq : float
+        Chi-squared value. Non-finite values are silently skipped.
+    ndof : int
+        Number of degrees of freedom.
+    xy : tuple, optional
+        Annotation anchor in the coordinate system given by xycoords.
+    xycoords : optional
+        Coordinate system for xy (default 'axes fraction').
+    ha, va : str, optional
+        Horizontal and vertical alignment.
+    **kwargs
+        Passed to ax.annotate (e.g. fontsize, xytext, textcoords).
+    """
+    if not np.isfinite(chisq):
+        return
+    p_str = f"{chi2_dist.sf(chisq, ndof):.2g}" if chi2_dist is not None else "N/A"
+    ax.annotate(
+        rf"$\chi^2$/ndf = {chisq:.1f}/{ndof}, $p$ = {p_str}",
+        xy=xy,
+        xycoords=xycoords,
+        ha=ha,
+        va=va,
+        **kwargs,
+    )
+
 
 def plot_var(indf: pd.DataFrame,
              var: tuple | str,
@@ -678,19 +721,15 @@ def plot_mc_data(mc_df: pd.DataFrame,
     total_ratio_err    = np.sqrt(total_ratio_data_err**2 + total_ratio_mc_err**2)
 
     valid = np.isfinite(data_hist) & np.isfinite(mc_tot)
-    ndf     = nbins
-    chi2    = np.nan
-    p_value = np.nan
+    ndf  = nbins
+    chi2 = np.nan
     if np.count_nonzero(valid) > 0:
         delta   = data_hist[valid] - mc_tot[valid]
         cov_sel = counts_cov[np.ix_(valid, valid)]
         try:
             chi2 = float(delta.T @ np.linalg.pinv(cov_sel) @ delta)
-            if chi2_dist is not None and np.isfinite(chi2):
-                p_value = float(chi2_dist.sf(chi2, df=ndf))
         except np.linalg.LinAlgError:
-            chi2    = np.nan
-            p_value = np.nan
+            chi2 = np.nan
 
     fig.canvas.draw()
     legend_loc  = str((_p.get('legend_kwargs') or {}).get('loc', '')).lower()
@@ -724,12 +763,12 @@ def plot_mc_data(mc_df: pd.DataFrame,
                         textcoords='offset points',
                         ha=ann_ha, va='top', fontsize=ann_fontsize)
         
-        ax_main.annotate(rf"$\chi^2$/ndf = {chi2:.1f}/{ndf}, $p$ = {p_value:.2g}",
-                        xy=(ann_x, ann_y),
-                        xycoords=ax_main.transAxes,
-                        xytext=(0, -20),
-                        textcoords='offset points',
-                        ha=ann_ha, va='top', fontsize=ann_fontsize)
+        annotate_chisq(ax_main, chi2, ndf,
+                       xy=(ann_x, ann_y),
+                       xycoords=ax_main.transAxes,
+                       xytext=(0, -20),
+                       textcoords='offset points',
+                       ha=ann_ha, va='top', fontsize=ann_fontsize)
 
     if bin_labels is not None:
         ax_main.set_xticks(bins)

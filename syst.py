@@ -18,6 +18,7 @@ from tqdm import tqdm
 __all__ = [
     'is_xsec',
     'calc_matrices',
+    'decompose_cov',
     'get_xsec_hists',
     'get_syst_hists',
     'get_syst',
@@ -99,6 +100,40 @@ def calc_matrices(var_arr: np.ndarray, cv: np.ndarray) -> tuple[np.ndarray, np.n
         cov_frac = (diffs_norm @ diffs_norm.T) / diffs_norm.shape[1]
         corr = cov / np.sqrt(np.outer(np.diag(cov),np.diag(cov)))
     return cov, cov_frac, corr
+
+def decompose_cov(C: np.ndarray, h: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Decompose a covariance matrix into normalization and shape components.
+
+    The normalization component is the fully-correlated outer-product piece that
+    scales all bins proportionally. The shape component is the remainder, and
+    by construction has zero net normalization (``C_shape.sum() == 0``).
+
+    Parameters
+    ----------
+    C : np.ndarray, shape (n, n)
+        Covariance matrix containing both normalization and shape contributions.
+    h : np.ndarray, shape (n,)
+        Nominal histogram (central-value bin counts) used to define the
+        normalization direction.
+
+    Returns
+    -------
+    C_norm : np.ndarray, shape (n, n)
+        Normalization covariance: ``outer(h, h) * sum(C) / sum(h)**2``.
+    C_shape : np.ndarray, shape (n, n)
+        Shape covariance: ``C - C_norm``.
+
+    Notes
+    -----
+    ``C_shape`` can have small negative eigenvalues near zero from floating-point
+    subtraction. This is expected and harmless for error-band plotting; use a
+    pseudoinverse if you need to invert ``C_shape`` (e.g. for a chi-square).
+    """
+    N = float(h.sum())
+    C_norm  = np.outer(h, h) * float(C.sum()) / N**2
+    C_shape = C - C_norm
+    return C_norm, C_shape
+
 
 def _get_xsec_hists_inner(
     smear_flat_idx: np.ndarray,
