@@ -12,6 +12,7 @@ constrain background uncertainty in the signal region. The workflow is:
 """
 from __future__ import annotations
 
+import warnings
 import numpy as np
 from collections.abc import Sequence
 import matplotlib.pyplot as plt
@@ -21,14 +22,17 @@ import seaborn as sns
 
 from .classes import SystematicsOutput, VariableConfig
 from .funcs import get_corr_from_cov, get_fractional_covariance
+from .syst import key_in_allowed
 
 __all__ = [
     "nonsymmetric_cov",
     "get_ccbc_cov",
     "get_chisq_diff",
     "get_chisq",
+    "plot_ccbc_summary",
     "plot_ccbc_constraint",
     "plot_ccbc_blocks",
+    "plot_ccbc_key_correlations",
 ]
 
 
@@ -36,6 +40,17 @@ __all__ = [
 # Private helpers
 # ---------------------------------------------------------------------------
 
+
+def _warn_key_mismatch(ref_keys: set, other_keys: set, ref_name: str, other_name: str) -> None:
+    only_ref   = ref_keys - other_keys
+    only_other = other_keys - ref_keys
+    if only_ref or only_other:
+        msg = f"Systematic universe key mismatch between {ref_name} and {other_name}."
+        if only_ref:
+            msg += f"\n  Only in {ref_name}: {sorted(only_ref)}"
+        if only_other:
+            msg += f"\n  Only in {other_name}: {sorted(only_other)}"
+        warnings.warn(msg, stacklevel=3)
 
 def _repeat(arr: np.ndarray) -> np.ndarray:
     """Prepend arr[0] so step-plot fill_between covers the leftmost bin edge."""
@@ -141,6 +156,7 @@ def get_ccbc_cov(
     Bs_output: SystematicsOutput,
     Ps_output: SystematicsOutput,
     nc_output: SystematicsOutput,
+    ns_output: SystematicsOutput | None = None,
     allowed_keys: Sequence[str] = ("GENIE", "Flux", "Geant4", "MCstat"),
     rcond: float = 1e-10,
 ) -> dict[str, np.ndarray]:
@@ -168,6 +184,18 @@ def get_ccbc_cov(
 
     where :math:`C^+` denotes the Moore–Penrose pseudoinverse.
 
+    Signal-component (P_S) covariance is built from ``Ps_output.xsec_syst_dict``
+    (response-matrix universe histograms) to capture the absolute cross-section
+    uncertainty rather than a plain rate uncertainty.  Background (B_S) and
+    control-region (n_C) components use ``rate_syst_dict`` (plain weighted
+    bincounts).  The CV used throughout is always ``rate_hist_cv``.
+
+    When ``ns_output`` is supplied, the on-the-fly ``cov_ns_ns`` is cross-checked
+    against ``ns_output.xsec_syst_dict``.  The identity holds exactly when
+    ``ns_h_xsec[key] = Ps_h_xsec[key] + Bs_h_rate[key]`` — i.e. the background
+    component of the n_S xsec universe histograms equals the B_S rate universe
+    histograms.  A mismatch warns that the inputs are inconsistent.
+
     Parameters
     ----------
     Bs_output : SystematicsOutput
@@ -176,10 +204,16 @@ def get_ccbc_cov(
     Ps_output : SystematicsOutput
         ``get_total_cov`` result for signal-only signal-region events
         (``event_type='signal'``, ``xsec_inputs`` required so that
-        ``xsec_syst_dict`` is populated).
+        ``xsec_syst_dict`` is populated with response-matrix universe histograms).
     nc_output : SystematicsOutput
         ``get_total_cov`` result for control-region events
         (``select_region='control'``).
+    ns_output : SystematicsOutput, optional
+        ``get_total_cov`` result for the total signal-region sample (P_S + B_S),
+        called with ``xsec_inputs`` so that ``xsec_syst_dict`` is populated.
+        When provided, ``cov_ns_ns`` is cross-checked against
+        ``ns_output.xsec_syst_dict``; a warning is raised if the relative
+        element-wise difference exceeds 1e-6.
     allowed_keys : sequence of str
         A universe key is included when any element of this sequence appears as
         a substring of the key string. Defaults to GENIE, Flux, Geant4, MCstat.
@@ -190,7 +224,7 @@ def get_ccbc_cov(
     Returns
     -------
     dict with keys:
-        ``cov_Bs_Bs``         — pre-constraint background auto-covariance
+    ``cov_Bs_Bs``         — pre-constraint background auto-covariance
         ``cov_Bs_Bs_constr``  — post-constraint background auto-covariance
         ``cov_ns_ns``         — pre-constraint total-rate covariance
         ``cov_ms_ms``         — post-constraint total-rate covariance
@@ -201,13 +235,20 @@ def get_ccbc_cov(
         ``cov_Ps_nc``         — signal × control cross-covariance
         ``cov_nc_nc``         — control-region auto-covariance
     """
+    nc_keys = set(nc_output.rate_syst_dict)
+    _warn_key_mismatch(nc_keys, set(Bs_output.rate_syst_dict), "nc_output", "Bs_output")
+    if Ps_output.xsec_syst_dict is not None:
+        _warn_key_mismatch(nc_keys, set(Ps_output.xsec_syst_dict), "nc_output", "Ps_output.xsec_syst_dict")
+    if ns_output is not None and ns_output.xsec_syst_dict is not None:
+        _warn_key_mismatch(nc_keys, set(ns_output.xsec_syst_dict), "nc_output", "ns_output.xsec_syst_dict")
+
     nbins  = len(nc_output.rate_hist_cv)
     zeros  = lambda: np.zeros((nbins, nbins))
     cov_Bs_nc = zeros(); cov_nc_nc = zeros(); cov_Ps_nc = zeros()
     cov_Ps_Bs = zeros(); cov_Bs_Bs = zeros(); cov_Ps_Ps = zeros()
 
     for key in nc_output.rate_syst_dict:
-        if not any(k in key for k in allowed_keys):
+        if not key_in_allowed(key, allowed_keys):
             continue
         if key not in Bs_output.rate_syst_dict:
             continue
@@ -236,6 +277,43 @@ def get_ccbc_cov(
     cov_ms_ms        = cov_Ps_Ps  + cov_Ps_Bs_constr + cov_Ps_Bs_constr.T + cov_Bs_Bs_constr
     cov_ns_ns        = cov_Ps_Ps  + cov_Ps_Bs        + cov_Ps_Bs.T        + cov_Bs_Bs
 
+    # Cross-check cov_ns_ns against ns_output.xsec_syst_dict if provided.
+    # The identity holds when ns_h_xsec = Ps_h_xsec + Bs_h_rate for each key,
+    # which is guaranteed when the background component of ns_output.xsec_syst_dict
+    # (a plain bincount over background events) equals Bs_output.rate_syst_dict.
+    # The CV used on both sides is rate_hist_cv so the algebraic identity
+    # cov(Ps_diff + Bs_diff) = cov_Ps_Ps + cross_terms + cov_Bs_Bs holds exactly.
+    if ns_output is not None:
+        if ns_output.xsec_syst_dict is None:
+            warnings.warn(
+                "ns_output provided but xsec_syst_dict is None; "
+                "skipping cov_ns_ns cross-check.",
+                stacklevel=2,
+            )
+        else:
+            ns_cv = ns_output.rate_hist_cv
+            cov_ns_ns_direct = zeros()
+            for key in nc_output.rate_syst_dict:
+                if not key_in_allowed(key, allowed_keys):
+                    continue
+                if key not in Bs_output.rate_syst_dict:
+                    continue
+                if key not in ns_output.xsec_syst_dict:
+                    continue
+                ns_h = ns_output.xsec_syst_dict[key]["hists"]
+                cov_ns_ns_direct += nonsymmetric_cov(ns_h, ns_cv, ns_h, ns_cv)
+
+            scale    = np.max(np.abs(cov_ns_ns))
+            rel_diff = np.max(np.abs(cov_ns_ns - cov_ns_ns_direct)) / scale if scale > 0 else 0.0
+            if rel_diff > 1e-6:
+                warnings.warn(
+                    f"cov_ns_ns cross-check failed (max relative diff = {rel_diff:.2e}). "
+                    "The on-the-fly combination of Ps_xsec and Bs_rate universe histograms "
+                    "differs from ns_output.xsec_syst_dict. "
+                    "Verify that ns_output uses the same events as Ps_output + Bs_output.",
+                    stacklevel=2,
+                )
+
     return {
         "cov_Bs_Bs":         cov_Bs_Bs,
         "cov_Bs_Bs_constr":  cov_Bs_Bs_constr,
@@ -247,6 +325,10 @@ def get_ccbc_cov(
         "cov_Bs_nc":         cov_Bs_nc,
         "cov_Ps_nc":         cov_Ps_nc,
         "cov_nc_nc":         cov_nc_nc,
+        # Pass inputs through so downstream plot functions can access rate_cov
+        # without the caller having to re-supply them.
+        "Bs_output":         Bs_output,
+        "ns_output":         ns_output,
     }
 
 
@@ -307,7 +389,8 @@ def plot_ccbc_constraint(
     ns_hist: np.ndarray,
     var_config: VariableConfig,
     list_keys: list[str],
-    colors: list[str],
+    category_dict_Bs: dict | None = None,
+    category_dict_ns: dict | None = None,
 ) -> tuple[plt.Figure, np.ndarray]:
     """Four-row panel comparing pre/post-constraint uncertainty for each systematic group.
 
@@ -325,24 +408,39 @@ def plot_ccbc_constraint(
 
     Parameters
     ----------
-    cov_list   : list of dicts returned by :func:`get_ccbc_cov`, one per column.
-                 Each dict must contain ``cov_Bs_Bs``, ``cov_Bs_Bs_constr``,
-                 ``cov_ns_ns``, ``cov_ms_ms`` (in event-count^2 units).
-    cov_stat   : single :func:`get_ccbc_cov` dict computed with MCstat only,
-                 used for the stat-only hatch overlay.
-    Bs_hist    : CV background histogram in event-count units.
-    ns_hist    : CV total event-rate histogram in event-count units.
-    var_config : VariableConfig for bin edges and axis labels.
-    list_keys  : column titles, one per entry in ``cov_list``.
-    colors     : post-constraint highlight colour per entry in ``cov_list``.
+    cov_list         : list of dicts returned by :func:`get_ccbc_cov`, one per column.
+                       Each dict must contain ``cov_Bs_Bs``, ``cov_Bs_Bs_constr``,
+                       ``cov_ns_ns``, ``cov_ms_ms`` (in event-count^2 units).
+    cov_stat         : single :func:`get_ccbc_cov` dict computed with MCstat only,
+                       used for the stat-only hatch overlay.
+    Bs_hist          : CV background histogram in event-count units.
+    ns_hist          : CV total event-rate histogram in event-count units.
+    var_config       : VariableConfig for bin edges and axis labels.
+    list_keys        : column titles, one per entry in ``cov_list``.  Each key is
+                       looked up in the two category dicts to obtain post-constraint
+                       highlight colours.
+    category_dict_Bs : category style dict used to colour the B_S rows.  Keys are
+                       systematic group names; each value must have a ``'color'`` entry.
+                       Defaults to ``analysis.category_dict_control``.
+    category_dict_ns : category style dict used to colour the n_S rows.
+                       Defaults to ``analysis.category_dict_signal``.
 
     Returns
     -------
     fig, axes  where axes has shape (4, ncols).
     """
-    ncols   = len(cov_list)
-    bins    = var_config.bins
-    centers = var_config.bin_centers
+    if category_dict_Bs is None or category_dict_ns is None:
+        from .analysis import category_dict_control, category_dict_signal
+        if category_dict_Bs is None:
+            category_dict_Bs = category_dict_control
+        if category_dict_ns is None:
+            category_dict_ns = category_dict_signal
+
+    ncols      = len(cov_list)
+    bins       = var_config.bins
+    centers    = var_config.bin_centers
+    colors_Bs  = [category_dict_Bs.get(k, {}).get("color", "C0") for k in list_keys]
+    colors_ns  = [category_dict_ns.get(k, {}).get("color", "C0") for k in list_keys]
 
     stat_ratio_Bs = np.sqrt(np.diag(cov_stat["cov_Bs_Bs"])) / Bs_hist
     stat_ratio_ns = np.sqrt(np.diag(cov_stat["cov_ns_ns"])) / ns_hist
@@ -355,7 +453,7 @@ def plot_ccbc_constraint(
     axes_ns_main  = [fig.add_subplot(gs[2, i]) for i in range(ncols)]
     axes_ns_ratio = [fig.add_subplot(gs[3, i]) for i in range(ncols)]
 
-    for i, (cov, color, key) in enumerate(zip(cov_list, colors, list_keys)):
+    for i, (cov, color_Bs, color_ns, key) in enumerate(zip(cov_list, colors_Bs, colors_ns, list_keys)):
         pre_cov_Bs  = cov["cov_Bs_Bs"]
         post_cov_Bs = cov["cov_Bs_Bs_constr"]
         pre_cov_ns  = cov["cov_ns_ns"]
@@ -366,12 +464,17 @@ def plot_ccbc_constraint(
         pre_ratio_ns  = np.sqrt(np.diag(pre_cov_ns))  / ns_hist
         post_ratio_ns = np.sqrt(np.diag(post_cov_ns)) / ns_hist
 
+        label_pre_Bs  = f"Pre-constraint ({np.sqrt(np.sum(pre_cov_Bs))  / np.sum(Bs_hist) * 100:.1f}%)"
+        label_post_Bs = f"Post-constraint ({np.sqrt(np.sum(post_cov_Bs)) / np.sum(Bs_hist) * 100:.1f}%)"
+        label_pre_ns  = f"Pre-constraint ({np.sqrt(np.sum(pre_cov_ns))  / np.sum(ns_hist) * 100:.1f}%)"
+        label_post_ns = f"Post-constraint ({np.sqrt(np.sum(post_cov_ns)) / np.sum(ns_hist) * 100:.1f}%)"
+
         # Row 1: B_S main
         axes_Bs_main[i].stairs(Bs_hist, bins, color="black", label=r"$B_S^{CV}$")
         axes_Bs_main[i].errorbar(centers, Bs_hist, yerr=np.sqrt(np.diag(pre_cov_Bs)),
-                                 fmt=".", capsize=3, color="black", label="Pre-constraint")
+                                 fmt=".", capsize=3, color="black", label=label_pre_Bs)
         axes_Bs_main[i].errorbar(centers, Bs_hist, yerr=np.sqrt(np.diag(post_cov_Bs)),
-                                 fmt=".", capsize=3, color=color,  label="Post-constraint")
+                                 fmt=".", capsize=3, color=color_Bs, label=label_post_Bs)
         axes_Bs_main[i].fill_between(
             x=bins,
             y1=_repeat(Bs_hist - np.sqrt(np.diag(cov_stat["cov_Bs_Bs"]))),
@@ -391,7 +494,7 @@ def plot_ccbc_constraint(
                                       step="pre", color="gray", alpha=0.3)
         axes_Bs_ratio[i].fill_between(bins, 1 - _repeat(post_ratio_Bs),
                                       1 + _repeat(post_ratio_Bs),
-                                      step="pre", color=color, alpha=0.5)
+                                      step="pre", color=color_Bs, alpha=0.5)
         axes_Bs_ratio[i].fill_between(bins, 1 - _repeat(stat_ratio_Bs),
                                       1 + _repeat(stat_ratio_Bs),
                                       step="pre", facecolor="none",
@@ -404,9 +507,9 @@ def plot_ccbc_constraint(
         # Row 3: n_S main
         axes_ns_main[i].stairs(ns_hist, bins, color="black", label=r"$n_S^{CV}$")
         axes_ns_main[i].errorbar(centers, ns_hist, yerr=np.sqrt(np.diag(pre_cov_ns)),
-                                 fmt=".", capsize=3, color="black", label="Pre-constraint")
+                                 fmt=".", capsize=3, color="black", label=label_pre_ns)
         axes_ns_main[i].errorbar(centers, ns_hist, yerr=np.sqrt(np.diag(post_cov_ns)),
-                                 fmt=".", capsize=3, color=color,  label="Post-constraint")
+                                 fmt=".", capsize=3, color=color_ns, label=label_post_ns)
         axes_ns_main[i].fill_between(
             x=bins,
             y1=_repeat(ns_hist - np.sqrt(np.diag(cov_stat["cov_ns_ns"]))),
@@ -425,7 +528,7 @@ def plot_ccbc_constraint(
                                       step="pre", color="gray", alpha=0.3)
         axes_ns_ratio[i].fill_between(bins, 1 - _repeat(post_ratio_ns),
                                       1 + _repeat(post_ratio_ns),
-                                      step="pre", color=color, alpha=0.5)
+                                      step="pre", color=color_ns, alpha=0.5)
         axes_ns_ratio[i].fill_between(bins, 1 - _repeat(stat_ratio_ns),
                                       1 + _repeat(stat_ratio_ns),
                                       step="pre", facecolor="none",
@@ -450,6 +553,197 @@ def plot_ccbc_constraint(
     all_axes = np.array([axes_Bs_main, axes_Bs_ratio,
                          axes_ns_main, axes_ns_ratio])
     return fig, all_axes
+
+
+def plot_ccbc_summary(
+    ccbc_cov: dict,
+    cov_stat: dict,
+    Bs_hist: np.ndarray,
+    ns_hist: np.ndarray,
+    var_config: VariableConfig,
+    color_Bs: str = "C1",
+    color_ns: str = "C0",
+    axes: np.ndarray | None = None,
+) -> tuple[plt.Figure, np.ndarray]:
+    """Two-panel summary of total pre/post-constraint uncertainty reduction.
+
+    Shows the total (all-group summed) pre- and post-constraint uncertainties
+    for the background-only (B_S) and total signal-region (n_S) samples.  A
+    2 × 2 GridSpec places B_S on the left and n_S on the right, with the main
+    histogram row on top and a fractional-uncertainty ratio panel below.
+
+    Complementary to :func:`plot_ccbc_constraint`, which shows per-systematic-
+    group breakdowns.  All histogram and covariance inputs must be in the same
+    event-count units (i.e. already scaled by the appropriate flux × POT factor).
+
+    The pre-constraint covariances are taken from ``ccbc_cov["Bs_output"].rate_cov``
+    and ``ccbc_cov["ns_output"].rate_cov`` — the full systematics outputs stored
+    by :func:`get_ccbc_cov` — rather than from the universe-systematic-only blocks
+    in ``ccbc_cov``.  The scale factor is inferred from ``Bs_hist`` vs
+    ``Bs_output.rate_hist_cv``.  When ``ccbc_cov["ns_output"]`` is ``None``
+    (i.e. ``ns_output`` was not passed to :func:`get_ccbc_cov`), the pre-constraint
+    n_S covariance falls back to ``ccbc_cov["cov_ns_ns"]``.
+
+    Parameters
+    ----------
+    ccbc_cov : dict returned by :func:`get_ccbc_cov`
+        Must contain ``cov_Bs_Bs_constr``, ``cov_ms_ms``, ``Bs_output``, and
+        optionally ``ns_output``.
+    cov_stat : dict
+        Same structure as ``ccbc_cov`` but computed with MC-stat only, for
+        the stat-only hatch overlay.
+    Bs_hist : np.ndarray, shape (nbins,)
+        CV background histogram in event-count units.
+    ns_hist : np.ndarray, shape (nbins,)
+        CV total event-rate histogram in event-count units.
+    var_config : VariableConfig
+        Bin edges and axis labels.
+    color_Bs : str, default ``"C1"``
+        Post-constraint colour for the background-only (B_S) panels.
+    color_ns : str, default ``"C0"``
+        Post-constraint colour for the signal+background (n_S) panels.
+    axes : (2, 2) array-like of Axes, optional
+        Pre-existing axes in row-major order
+        ``[[bs_main, ns_main], [bs_ratio, ns_ratio]]``.
+        A new figure is created if not provided.
+
+    Returns
+    -------
+    fig : plt.Figure
+    axes : np.ndarray, shape (2, 2)
+        ``axes[0, 0]`` — B_S main panel
+        ``axes[0, 1]`` — n_S main panel
+        ``axes[1, 0]`` — B_S ratio panel
+        ``axes[1, 1]`` — n_S ratio panel
+    """
+    bins       = var_config.bins
+    centers    = var_config.bin_centers
+    Bs_output  = ccbc_cov["Bs_output"]
+    ns_output  = ccbc_cov["ns_output"]
+
+    # Infer the scale factor from the already-scaled Bs_hist.
+    scale_sq = (np.sum(Bs_hist) / np.sum(Bs_output.rate_hist_cv)) ** 2
+
+    pre_cov_Bs  = ccbc_cov["cov_Bs_Bs"] * scale_sq
+    post_cov_Bs = ccbc_cov["cov_Bs_Bs_constr"] * scale_sq
+    pre_cov_ns  = ccbc_cov["cov_ns_ns"] * scale_sq
+    post_cov_ns = ccbc_cov["cov_ms_ms"] * scale_sq
+
+    pre_err_Bs  = np.sqrt(np.diag(pre_cov_Bs))
+    post_err_Bs = np.sqrt(np.diag(post_cov_Bs))
+    pre_err_ns  = np.sqrt(np.diag(pre_cov_ns))
+    post_err_ns = np.sqrt(np.diag(post_cov_ns))
+
+    stat_err_Bs = np.sqrt(np.diag(cov_stat["cov_Bs_Bs"] * scale_sq))
+    stat_err_ns = np.sqrt(np.diag(cov_stat["cov_ns_ns"] * scale_sq))
+
+    pre_ratio_Bs  = pre_err_Bs  / Bs_hist
+    post_ratio_Bs = post_err_Bs / Bs_hist
+    pre_ratio_ns  = pre_err_ns  / ns_hist
+    post_ratio_ns = post_err_ns / ns_hist
+    stat_ratio_Bs = stat_err_Bs / Bs_hist
+    stat_ratio_ns = stat_err_ns / ns_hist
+
+    label_pre_Bs  = f"Pre-constraint ({np.sqrt(np.sum(pre_cov_Bs))  / np.sum(Bs_hist) * 100:.1f}%)"
+    label_post_Bs = f"Post-constraint ({np.sqrt(np.sum(post_cov_Bs)) / np.sum(Bs_hist) * 100:.1f}%)"
+    label_pre_ns  = f"Pre-constraint ({np.sqrt(np.sum(pre_cov_ns))  / np.sum(ns_hist) * 100:.1f}%)"
+    label_post_ns = f"Post-constraint ({np.sqrt(np.sum(post_cov_ns)) / np.sum(ns_hist) * 100:.1f}%)"
+
+    if axes is None:
+        fig = plt.figure(figsize=(10, 5))
+        gs  = GridSpec(2, 2, height_ratios=[4, 1], hspace=0.35, wspace=0.25)
+        ax_bs_main  = fig.add_subplot(gs[0, 0])
+        ax_ns_main  = fig.add_subplot(gs[0, 1])
+        ax_bs_ratio = fig.add_subplot(gs[1, 0])
+        ax_ns_ratio = fig.add_subplot(gs[1, 1])
+        axes = np.array([[ax_bs_main, ax_ns_main], [ax_bs_ratio, ax_ns_ratio]])
+    else:
+        axes = np.asarray(axes)
+        fig  = axes[0, 0].get_figure()
+        ax_bs_main,  ax_ns_main  = axes[0, 0], axes[0, 1]
+        ax_bs_ratio, ax_ns_ratio = axes[1, 0], axes[1, 1]
+
+    # B_S main panel
+    ax_bs_main.stairs(Bs_hist, bins, color="black", label=r"$B_S^{CV}$")
+    ax_bs_main.errorbar(centers, Bs_hist, yerr=pre_err_Bs,
+                        fmt=".", capsize=3, color="black", label=label_pre_Bs)
+    ax_bs_main.errorbar(centers, Bs_hist, yerr=post_err_Bs,
+                        fmt=".", capsize=3, color=color_Bs, label=label_post_Bs)
+    ax_bs_main.fill_between(
+        x=bins,
+        y1=_repeat(Bs_hist - stat_err_Bs),
+        y2=_repeat(Bs_hist + stat_err_Bs),
+        step="pre", facecolor="none",
+        edgecolor=mpl.colors.to_rgba("gray", 0.5), lw=0, hatch="////",
+        label="MC stat only",
+    )
+    ax_bs_main.set_title("Background only")
+    ax_bs_main.set_ylabel("Events (Flux-Averaged)")
+    ax_bs_main.legend(fontsize=9)
+    ax_bs_main.set_xticks(bins)
+    ax_bs_main.set_xticklabels(var_config.bin_labels, fontsize=8)
+
+    # n_S main panel
+    ax_ns_main.stairs(ns_hist, bins, color="black", label=r"$n_S^{CV}$")
+    ax_ns_main.errorbar(centers, ns_hist, yerr=pre_err_ns,
+                        fmt=".", capsize=3, color="black", label=label_pre_ns)
+    ax_ns_main.errorbar(centers, ns_hist, yerr=post_err_ns,
+                        fmt=".", capsize=3, color=color_ns, label=label_post_ns)
+    ax_ns_main.fill_between(
+        x=bins,
+        y1=_repeat(ns_hist - stat_err_ns),
+        y2=_repeat(ns_hist + stat_err_ns),
+        step="pre", facecolor="none",
+        edgecolor=mpl.colors.to_rgba("gray", 0.5), lw=0, hatch="////",
+        label="MC stat only",
+    )
+    ax_ns_main.set_title("Signal + Background")
+    ax_ns_main.set_ylabel("Events (Flux-Averaged)")
+    ax_ns_main.legend(fontsize=9)
+    ax_ns_main.set_xticks(bins)
+    ax_ns_main.set_xticklabels(var_config.bin_labels, fontsize=8)
+
+    # B_S ratio panel
+    ax_bs_ratio.fill_between(bins, 1 - _repeat(pre_ratio_Bs), 1 + _repeat(pre_ratio_Bs),
+                              step="pre", color="gray", alpha=0.3)
+    ax_bs_ratio.fill_between(bins, 1 - _repeat(post_ratio_Bs), 1 + _repeat(post_ratio_Bs),
+                              step="pre", color=color_Bs, alpha=0.5)
+    ax_bs_ratio.fill_between(bins, 1 - _repeat(stat_ratio_Bs), 1 + _repeat(stat_ratio_Bs),
+                              step="pre", facecolor="none", edgecolor="gray", hatch="//")
+    ax_bs_ratio.axhline(1.0, color="k", lw=0.8, ls="--", alpha=0.7)
+    ax_bs_ratio.set_ylabel("Ratio")
+    ax_bs_ratio.set_xlabel(var_config.var_labels[1])
+    ax_bs_ratio.set_xticks(bins)
+    ax_bs_ratio.set_xticklabels(var_config.bin_labels, fontsize=8)
+
+    # n_S ratio panel
+    ax_ns_ratio.fill_between(bins, 1 - _repeat(pre_ratio_ns), 1 + _repeat(pre_ratio_ns),
+                              step="pre", color="gray", alpha=0.3)
+    ax_ns_ratio.fill_between(bins, 1 - _repeat(post_ratio_ns), 1 + _repeat(post_ratio_ns),
+                              step="pre", color=color_ns, alpha=0.5)
+    ax_ns_ratio.fill_between(bins, 1 - _repeat(stat_ratio_ns), 1 + _repeat(stat_ratio_ns),
+                              step="pre", facecolor="none", edgecolor="gray", hatch="//")
+    ax_ns_ratio.axhline(1.0, color="k", lw=0.8, ls="--", alpha=0.7)
+    ax_ns_ratio.set_ylabel("Ratio")
+    ax_ns_ratio.set_xlabel(var_config.var_labels[1])
+    ax_ns_ratio.set_xticks(bins)
+    ax_ns_ratio.set_xticklabels(var_config.bin_labels, fontsize=8)
+
+    # Shared y-limits across the two columns
+    y0 = min(ax_bs_main.get_ylim()[0],  ax_ns_main.get_ylim()[0])
+    y1 = max(ax_bs_main.get_ylim()[1],  ax_ns_main.get_ylim()[1])
+    ax_bs_main.set_ylim(y0, y1)
+    ax_ns_main.set_ylim(y0, y1)
+
+    r0 = min(ax_bs_ratio.get_ylim()[0], ax_ns_ratio.get_ylim()[0])
+    r1 = max(ax_bs_ratio.get_ylim()[1], ax_ns_ratio.get_ylim()[1])
+    ax_bs_ratio.set_ylim(r0, r1)
+    ax_ns_ratio.set_ylim(r0, r1)
+
+    for ax in axes.flat:
+        ax.tick_params(axis="y", labelsize=8)
+
+    return fig, axes
 
 
 def plot_ccbc_blocks(
@@ -479,12 +773,14 @@ def plot_ccbc_blocks(
     -------
     fig, axes   where axes has shape (2,).
     """
+    _warn_key_mismatch(set(nc_output.rate_syst_dict), set(Bs_output.rate_syst_dict), "nc_output", "Bs_output")
+
     nbins = len(Bs_output.rate_hist_cv)
     zeros = lambda: np.zeros((nbins, nbins))
     cov_Bs_nc = zeros(); cov_nc_nc = zeros(); cov_Bs_Bs = zeros()
 
     for key in nc_output.rate_syst_dict:
-        if not any(k in key for k in allowed_keys):
+        if not key_in_allowed(key, allowed_keys):
             continue
         if key not in Bs_output.rate_syst_dict:
             continue
@@ -517,3 +813,113 @@ def plot_ccbc_blocks(
 
     _annotate_block_axes(axes, nbins=nbins, var=var)
     return fig, axes
+
+
+def plot_ccbc_key_correlations(
+    Bs_output: SystematicsOutput,
+    nc_output: SystematicsOutput,
+    allowed_keys: Sequence[str] = ("GENIE",),
+    sort_by: str = "correlation",
+    ax: plt.Axes | None = None,
+) -> tuple[plt.Figure, plt.Axes, object]:
+    """Per-key normalization-level correlation between signal-region background and sideband.
+
+    For each systematic key that matches ``allowed_keys`` and is present in both
+    outputs, sums universe histogram fluctuations across bins to obtain a scalar
+    per universe, then computes the Pearson correlation between B_S and n_C
+    across universes.  A correlation near +1 means the knob shifts both regions
+    together (CCBC can constrain it); near 0 means the two regions respond
+    independently (CCBC provides no constraint).
+
+    Parameters
+    ----------
+    Bs_output : SystematicsOutput
+        Signal-region background-only systematics output.
+    nc_output : SystematicsOutput
+        Sideband (control-region) systematics output.
+    allowed_keys : sequence of str, default ``("GENIE",)``
+        Key substrings to include — passed to :func:`~nueana.syst.key_in_allowed`.
+    sort_by : ``"correlation"`` or ``"unc_norm_Bs"``
+        Bar ordering. ``"correlation"`` (default) puts the least-correlated
+        keys first, making it easy to spot knobs that won't be constrained.
+        ``"unc_norm_Bs"`` orders by the B_S normalization uncertainty, putting
+        the most impactful knobs first.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes to draw into. A new figure is created if not provided.
+
+    Returns
+    -------
+    fig : plt.Figure
+    ax  : plt.Axes
+    df  : pd.DataFrame
+        Per-key table with columns ``key``, ``correlation``, ``unc_norm_Bs``,
+        ``unc_norm_nc``.  Useful for further inspection.
+    """
+    import pandas as pd
+
+    Bs_cv = np.asarray(Bs_output.rate_hist_cv)
+    nc_cv = np.asarray(nc_output.rate_hist_cv)
+    N_Bs  = float(np.sum(Bs_cv))
+    N_nc  = float(np.sum(nc_cv))
+
+    records = []
+    for key in nc_output.rate_syst_dict:
+        if not key_in_allowed(key, allowed_keys):
+            continue
+        if key not in Bs_output.rate_syst_dict:
+            continue
+
+        Bs_h = np.asarray(Bs_output.rate_syst_dict[key]["hists"])  # (nbins, nuniv)
+        nc_h = np.asarray(nc_output.rate_syst_dict[key]["hists"])
+
+        # scalar fluctuation per universe: sum bins, subtract CV total
+        delta_Bs = Bs_h.sum(axis=0) - Bs_cv.sum()   # shape (nuniv,)
+        delta_nc = nc_h.sum(axis=0) - nc_cv.sum()
+
+        corr = float(np.corrcoef(delta_Bs, delta_nc)[0, 1]) if delta_Bs.std() > 0 and delta_nc.std() > 0 else 0.0
+
+        cov_Bs = nonsymmetric_cov(Bs_h, Bs_cv, Bs_h, Bs_cv)
+        cov_nc = nonsymmetric_cov(nc_h, nc_cv, nc_h, nc_cv)
+        unc_norm_Bs = float(np.sqrt(max(np.sum(cov_Bs), 0.0))) / N_Bs if N_Bs > 0 else 0.0
+        unc_norm_nc = float(np.sqrt(max(np.sum(cov_nc), 0.0))) / N_nc if N_nc > 0 else 0.0
+
+        records.append({"key": key, "correlation": corr,
+                        "unc_norm_Bs": unc_norm_Bs, "unc_norm_nc": unc_norm_nc})
+
+    import pandas as pd
+    df = pd.DataFrame(records)
+    if df.empty:
+        raise ValueError("No keys matched allowed_keys in both Bs_output and nc_output.")
+
+    ascending = sort_by == "correlation"
+    df = df.sort_values(sort_by, ascending=ascending).reset_index(drop=True)
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(7, max(4, 0.3 * len(df))))
+    else:
+        fig = ax.get_figure()
+
+    colors = [plt.cm.RdYlGn(0.1 + 0.8 * (c + 1) / 2) for c in df["correlation"]]
+    bars = ax.barh(df["key"], df["correlation"], color=colors, edgecolor="none")
+
+    # annotate each bar with unc_norm_Bs
+    for bar, unc in zip(bars, df["unc_norm_Bs"]):
+        x = bar.get_width()
+        ax.text(
+            x + 0.01 if x >= 0 else x - 0.01,
+            bar.get_y() + bar.get_height() / 2,
+            f"{unc:.1%}",
+            va="center", ha="left" if x >= 0 else "right", fontsize=7, color="dimgray",
+        )
+
+    ax.axvline(0, color="k", lw=0.8, ls="--", alpha=0.5)
+    ax.set_xlim(-1.1, 1.3)
+    ax.set_xlabel(r"Pearson $\rho$  (B$_S$ vs $n_C$, normalization)")
+    ax.set_title(f"Per-key B$_S$–$n_C$ correlation  [{', '.join(allowed_keys)}]")
+    ax.tick_params(axis="y", labelsize=8)
+
+    sm = plt.cm.ScalarMappable(cmap="RdYlGn", norm=mpl.colors.Normalize(-1, 1))
+    sm.set_array([])
+    fig.colorbar(sm, ax=ax, label=r"$\rho$", fraction=0.03, pad=0.02)
+
+    return fig, ax, df

@@ -13,7 +13,7 @@ from collections.abc import Callable
 
 from .utils import get_hist1d, get_hist2d, ensure_lexsorted
 from .classes import VariableConfig, SystematicsOutput
-from .syst import _classify_category
+from .syst import key_in_allowed
 
 __all__ = [
     'UnfoldInput',
@@ -107,7 +107,7 @@ class UnfoldInput:
         n_bins = self.cv_signal.shape[0]
         cov = np.zeros((n_bins, n_bins))
         for k, c in self.syst_covs.items():
-            if allowed_keys is None or _classify_category(k) in allowed_keys:
+            if key_in_allowed(k, allowed_keys):
                 cov += c
         cov = cov * self.flux_scale
         if extra_cov is not None:

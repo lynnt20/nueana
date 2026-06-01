@@ -10,6 +10,7 @@ Functions that support disabling this accept a `scale=True` parameter.
 """
 from __future__ import annotations
 
+import hashlib
 import numpy as np
 import pandas as pd
 import warnings
@@ -19,6 +20,7 @@ __all__ = [
     'is_xsec',
     'calc_matrices',
     'decompose_cov',
+    'key_in_allowed',
     'get_xsec_hists',
     'get_syst_hists',
     'get_syst',
@@ -677,6 +679,27 @@ def _classify_category(key: str) -> str | None:
     return next((cat for cat in _CATEGORY_KEYWORDS if cat in key), None)
 
 
+def key_in_allowed(key: str, allowed_keys) -> bool:
+    """Return True if a systematic key's category appears in allowed_keys.
+
+    Parameters
+    ----------
+    key : str
+        Raw systematic key string (as it appears in syst_dict).
+    allowed_keys : sequence of str or None
+        Category names to include (e.g. ``('GENIE', 'MCstat')``).
+        GENIE aliases (SBNNuSyst, SuSAv2) are handled correctly.
+        None means all keys are allowed.
+
+    Returns
+    -------
+    bool
+    """
+    if allowed_keys is None:
+        return True
+    return _classify_category(key) in allowed_keys
+
+
 def _classify_detvar_subcategory(detvar_key: str) -> str:
     """Map a detector variation key to its analysis subcategory."""
     key    = detvar_key.lower()
@@ -790,10 +813,15 @@ def make_multiverse_weights(evtdf, knob_list, n_univs=100, evt_prefix=None, nudf
         raise ValueError("Index names of nudf and evtdf must match.")
 
     def _draws(knob, df_idx):
-        """Return (n_univs,) array of per-universe Gaussian draws with reproducible seeds."""
+        """Return (n_univs,) array of per-universe Gaussian draws with reproducible seeds.
+
+        Uses hashlib (not Python's hash()) so seeds are identical across processes
+        regardless of PYTHONHASHSEED — required for cross-notebook synchronization.
+        """
         out = np.empty(n_univs)
         for i in range(n_univs):
-            np.random.seed(hash(knob + str(i) + str(df_idx)) % 2**32)
+            digest = hashlib.md5(f"{knob}{i}{df_idx}".encode()).hexdigest()
+            np.random.seed(int(digest, 16) % 2**32)
             out[i] = np.random.normal(0, 1)
         return out
 

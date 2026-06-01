@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 import gc
+import pickle
 
 import numpy as np
 import pandas as pd
 
-__all__ = ['get_n_split', 'print_keys', 'load_dfs', 'load_mc', 'load_data']
+from .classes import SystematicsOutput
+
+__all__ = ['get_n_split', 'print_keys', 'load_dfs', 'load_mc', 'load_data',
+           'save_signal_checkpoint', 'load_signal_checkpoint',
+           'save_sideband_checkpoint', 'load_sideband_checkpoint']
 
 # credit for first three functions to Mun! 
 def get_n_split(file):
@@ -237,3 +242,111 @@ def load_data(
 
     sel = select(df, cuts=cuts) if cuts is not None else df
     return sel, pot, ngates
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint save / load
+# ---------------------------------------------------------------------------
+
+def save_signal_checkpoint(
+    path: str,
+    reco_df: pd.DataFrame,
+    true_df: pd.DataFrame,
+    syst_total: dict[str, SystematicsOutput],
+    syst_signal: dict[str, SystematicsOutput],
+    syst_bkg: dict[str, SystematicsOutput],
+) -> None:
+    """Pickle signal region outputs needed for fake-data tests and CCBC.
+
+    Parameters
+    ----------
+    path : str
+        Destination file path (e.g. ``"signal_checkpoint.pkl"``).
+    reco_df : pd.DataFrame
+        Selected and preprocessed reco-level MC DataFrame.
+    true_df : pd.DataFrame
+        True-level signal DataFrame (used for response matrix / unfolding).
+    syst_total : dict[str, SystematicsOutput]
+        Total (signal + background) systematics keyed by ``var_save_name``
+        (e.g. ``{"energy": ..., "direction": ...}``).
+    syst_signal : dict[str, SystematicsOutput]
+        Signal-only systematics, same keys as ``syst_total``.
+    syst_bkg : dict[str, SystematicsOutput]
+        Background-only systematics, same keys as ``syst_total``.
+    """
+    payload = {
+        "reco_df":     reco_df,
+        "true_df":     true_df,
+        "syst_total":  syst_total,
+        "syst_signal": syst_signal,
+        "syst_bkg":    syst_bkg,
+    }
+    with open(path, "wb") as f:
+        pickle.dump(payload, f)
+
+
+def load_signal_checkpoint(
+    path: str,
+) -> tuple[pd.DataFrame, pd.DataFrame,
+           dict[str, SystematicsOutput],
+           dict[str, SystematicsOutput],
+           dict[str, SystematicsOutput]]:
+    """Load a checkpoint written by :func:`save_signal_checkpoint`.
+
+    Parameters
+    ----------
+    path : str
+        Path to the pickle file.
+
+    Returns
+    -------
+    reco_df : pd.DataFrame
+    true_df : pd.DataFrame
+    syst_total : dict[str, SystematicsOutput]
+    syst_signal : dict[str, SystematicsOutput]
+    syst_bkg : dict[str, SystematicsOutput]
+    """
+    with open(path, "rb") as f:
+        ck = pickle.load(f)
+    return ck["reco_df"], ck["true_df"], ck["syst_total"], ck["syst_signal"], ck["syst_bkg"]
+
+
+def save_sideband_checkpoint(
+    path: str,
+    reco_df: pd.DataFrame,
+    syst_total: dict[str, SystematicsOutput],
+) -> None:
+    """Pickle sideband region outputs.
+
+    Parameters
+    ----------
+    path : str
+        Destination file path (e.g. ``"sideband_checkpoint.pkl"``).
+    reco_df : pd.DataFrame
+        Selected and preprocessed reco-level DataFrame.
+    syst_total : dict[str, SystematicsOutput]
+        Total systematics keyed by ``var_save_name``
+        (e.g. ``{"energy": ..., "direction": ...}``).
+    """
+    with open(path, "wb") as f:
+        pickle.dump({"reco_df": reco_df, "syst_total": syst_total}, f)
+
+
+def load_sideband_checkpoint(
+    path: str,
+) -> tuple[pd.DataFrame, dict[str, SystematicsOutput]]:
+    """Load a checkpoint written by :func:`save_sideband_checkpoint`.
+
+    Parameters
+    ----------
+    path : str
+        Path to the pickle file.
+
+    Returns
+    -------
+    reco_df : pd.DataFrame
+    syst_total : dict[str, SystematicsOutput]
+    """
+    with open(path, "rb") as f:
+        ck = pickle.load(f)
+    return ck["reco_df"], ck["syst_total"]
