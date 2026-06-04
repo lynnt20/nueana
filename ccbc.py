@@ -27,9 +27,11 @@ from .syst import key_in_allowed
 __all__ = [
     "nonsymmetric_cov",
     "get_ccbc_cov",
+    "get_constrained_background",
     "get_chisq_diff",
     "get_chisq",
     "plot_ccbc_summary",
+    "plot_ccbc_fd_comparison",
     "plot_ccbc_constraint",
     "plot_ccbc_blocks",
     "plot_ccbc_key_correlations",
@@ -159,6 +161,8 @@ def get_ccbc_cov(
     ns_output: SystematicsOutput | None = None,
     allowed_keys: Sequence[str] = ("GENIE", "Flux", "Geant4", "MCstat"),
     rcond: float = 1e-10,
+    data_stat_nc: np.ndarray | None = None,
+    data_stat_ns: np.ndarray | None = None,
 ) -> dict[str, np.ndarray]:
     """Assemble CCBC block covariance matrices and apply the sideband constraint.
 
@@ -220,20 +224,54 @@ def get_ccbc_cov(
     rcond : float
         Regularisation cut-off for ``np.linalg.pinv`` applied to
         ``cov_nc_nc``.  Default 1e-10.
+    data_stat_nc : np.ndarray, shape (nbins, nbins), optional
+        Data-statistical covariance on the observed control-region histogram
+        (same flux-averaged units as ``nc_output.rate_hist_cv``).  When given,
+        it is added to ``cov_nc_nc`` *before* the pseudoinverse — softening
+        the constraint, since a noisy sideband measurement should be trusted
+        less.  Typical Poisson form: ``np.diag(nc_raw_counts) / flux_norm**2``.
+        The returned ``cov_nc_nc`` block is left as the pure systematic for
+        plotting; only ``pinv_nc_nc`` and the constrained blocks see the
+        stat-augmented version.
+    data_stat_ns : np.ndarray, shape (nbins, nbins), optional
+        Data-statistical covariance on the observed total signal-region
+        histogram (same flux-averaged units as ``Bs_output.rate_hist_cv``).
+        When given, it is added to both ``cov_ns_ns`` and ``cov_ms_ms`` after
+        the constraint is applied.  The same matrix appears in both because
+        the same observed total enters the unconstrained and constrained
+        background-subtracted measurements.
 
     Returns
     -------
     dict with keys:
-    ``cov_Bs_Bs``         — pre-constraint background auto-covariance
-        ``cov_Bs_Bs_constr``  — post-constraint background auto-covariance
-        ``cov_ns_ns``         — pre-constraint total-rate covariance
-        ``cov_ms_ms``         — post-constraint total-rate covariance
-        ``cov_Ps_Ps``         — signal-component auto-covariance
-        ``cov_Ps_Bs``         — signal × background cross-covariance
-        ``cov_Ps_Bs_constr``  — post-constraint signal × background cross-covariance
-        ``cov_Bs_nc``         — background × control cross-covariance
-        ``cov_Ps_nc``         — signal × control cross-covariance
-        ``cov_nc_nc``         — control-region auto-covariance
+    ``cov_Bs_Bs``            — pre-constraint background auto-covariance
+        ``cov_Bs_Bs_constr``     — post-constraint background auto-covariance
+                                   (incorporates ``data_stat_nc`` via the softened pinv)
+        ``cov_ns_ns``            — pre-constraint total-rate covariance
+                                   (includes ``data_stat_ns`` if given)
+        ``cov_ms_ms``            — post-constraint total-rate covariance
+                                   (includes ``data_stat_ns`` if given, plus ``data_stat_nc``
+                                   propagated through the constraint)
+        ``cov_Ps_Ps``            — signal-component auto-covariance
+        ``cov_Ps_Bs``            — signal × background cross-covariance
+        ``cov_Ps_Bs_constr``     — post-constraint signal × background cross-covariance
+        ``cov_Bs_nc``            — background × control cross-covariance
+        ``cov_Ps_nc``            — signal × control cross-covariance
+        ``cov_nc_nc``            — control-region auto-covariance
+        ``norm_cov_Bs_Bs``       — scalar (1-bin) pre-constraint background variance
+        ``norm_cov_Bs_Bs_constr``— scalar (1-bin) post-constraint background variance
+        ``norm_cov_ns_ns``       — scalar (1-bin) pre-constraint total variance
+        ``norm_cov_ms_ms``       — scalar (1-bin) post-constraint total variance
+        ``pinv_nc_nc``           — Moore-Penrose pseudoinverse of the symmetrised cov_nc_nc
+        ``nc_output``            — pass-through of the nc_output argument
+
+    The four ``norm_cov_*`` scalars use the rate-only (plain bincount) universe
+    histograms for all three components so that the implied normalization
+    uncertainty percentage is independent of which variable is being binned.
+
+    ``pinv_nc_nc`` and ``nc_output`` are stored so that
+    :func:`get_constrained_background` can apply the CCBC linear predictor
+    without the caller having to re-supply or recompute them.
     """
     nc_keys = set(nc_output.rate_syst_dict)
     _warn_key_mismatch(nc_keys, set(Bs_output.rate_syst_dict), "nc_output", "Bs_output")
@@ -246,6 +284,9 @@ def get_ccbc_cov(
     zeros  = lambda: np.zeros((nbins, nbins))
     cov_Bs_nc = zeros(); cov_nc_nc = zeros(); cov_Ps_nc = zeros()
     cov_Ps_Bs = zeros(); cov_Bs_Bs = zeros(); cov_Ps_Ps = zeros()
+
+    # Scalar (1-bin) rate-only accumulators for variable-independent norm percentages.
+    norm_Ps_Ps = 0.0;  norm_Ps_Bs = 0.0;  norm_Ps_nc = 0.0
 
     for key in nc_output.rate_syst_dict:
         if not key_in_allowed(key, allowed_keys):
@@ -270,12 +311,46 @@ def get_ccbc_cov(
         cov_Bs_Bs += nonsymmetric_cov(Bs_h, Bs_cv, Bs_h, Bs_cv)
         cov_Ps_Ps += nonsymmetric_cov(Ps_h, Ps_cv, Ps_h, Ps_cv)
 
+        # Scalar (1-bin) accumulators matching get_syst_df convention:
+        # h.sum(axis=0) - cv.sum() gives a per-universe scalar deviation;
+        # dot(dev, dev) / nuniv is the normalization variance.
+        # Ps uses xsec_syst_dict (Ps_h already set above) with rate_hist_cv as CV.
+        # Bs and nc use rate_syst_dict (Bs_h, nc_h already set above) with rate_hist_cv.
+        # rate_hist_cv is used throughout (not xsec_hist_cv, which is background-subtracted).
+        _nuniv = np.asarray(Ps_h).shape[1]
+        Ps_d = np.asarray(Ps_h).sum(axis=0) - float(np.asarray(Ps_cv).sum())
+        Bs_d = np.asarray(Bs_h).sum(axis=0) - float(np.asarray(Bs_cv).sum())
+        nc_d = np.asarray(nc_h).sum(axis=0) - float(np.asarray(nc_cv).sum())
+        norm_Ps_Ps += float(np.dot(Ps_d, Ps_d)) / _nuniv
+        norm_Ps_Bs += float(np.dot(Ps_d, Bs_d)) / _nuniv
+        norm_Ps_nc += float(np.dot(Ps_d, nc_d)) / _nuniv
+
     cov_nc_nc_sym    = (cov_nc_nc + cov_nc_nc.T) / 2
-    pinv_nc          = np.linalg.pinv(cov_nc_nc_sym, rcond=rcond)
+    # Data stats on n_C soften the constraint: a noisier sideband
+    # measurement should be trusted less when correcting B_S.
+    cov_nc_nc_pinv_input = cov_nc_nc_sym + (data_stat_nc if data_stat_nc is not None else 0.0)
+    pinv_nc          = np.linalg.pinv(cov_nc_nc_pinv_input, rcond=rcond)
     cov_Bs_Bs_constr = cov_Bs_Bs  - cov_Bs_nc @ pinv_nc @ cov_Bs_nc.T
     cov_Ps_Bs_constr = cov_Ps_Bs  - cov_Ps_nc @ pinv_nc @ cov_Bs_nc.T
     cov_ms_ms        = cov_Ps_Ps  + cov_Ps_Bs_constr + cov_Ps_Bs_constr.T + cov_Bs_Bs_constr
     cov_ns_ns        = cov_Ps_Ps  + cov_Ps_Bs        + cov_Ps_Bs.T        + cov_Bs_Bs
+    if data_stat_ns is not None:
+        cov_ms_ms = cov_ms_ms + data_stat_ns
+        cov_ns_ns = cov_ns_ns + data_stat_ns
+
+    # Scalar (1-bin) CCBC constraint — variable-independent normalization percentages.
+    # Bs and nc blocks: summing a rate covariance matrix = scalar rate variance.
+    norm_Bs_Bs = float(np.sum(cov_Bs_Bs))
+    norm_Bs_nc = float(np.sum(cov_Bs_nc))
+    norm_nc_nc = float(np.sum(cov_nc_nc))
+    if norm_nc_nc > 0:
+        norm_Bs_Bs_constr = norm_Bs_Bs - norm_Bs_nc ** 2 / norm_nc_nc
+        norm_Ps_Bs_constr = norm_Ps_Bs - norm_Ps_nc * norm_Bs_nc / norm_nc_nc
+    else:
+        norm_Bs_Bs_constr = norm_Bs_Bs
+        norm_Ps_Bs_constr = norm_Ps_Bs
+    norm_ms_ms = norm_Ps_Ps + 2.0 * norm_Ps_Bs_constr + norm_Bs_Bs_constr
+    norm_ns_ns = norm_Ps_Ps + 2.0 * norm_Ps_Bs        + norm_Bs_Bs
 
     # Cross-check cov_ns_ns against ns_output.xsec_syst_dict if provided.
     # The identity holds when ns_h_xsec = Ps_h_xsec + Bs_h_rate for each key,
@@ -303,8 +378,11 @@ def get_ccbc_cov(
                 ns_h = ns_output.xsec_syst_dict[key]["hists"]
                 cov_ns_ns_direct += nonsymmetric_cov(ns_h, ns_cv, ns_h, ns_cv)
 
-            scale    = np.max(np.abs(cov_ns_ns))
-            rel_diff = np.max(np.abs(cov_ns_ns - cov_ns_ns_direct)) / scale if scale > 0 else 0.0
+            # Compare against the syst-only part of cov_ns_ns; data_stat_ns is
+            # added externally and is not built from universe histograms.
+            cov_ns_ns_syst = cov_ns_ns - (data_stat_ns if data_stat_ns is not None else 0.0)
+            scale    = np.max(np.abs(cov_ns_ns_syst))
+            rel_diff = np.max(np.abs(cov_ns_ns_syst - cov_ns_ns_direct)) / scale if scale > 0 else 0.0
             if rel_diff > 1e-6:
                 warnings.warn(
                     f"cov_ns_ns cross-check failed (max relative diff = {rel_diff:.2e}). "
@@ -315,21 +393,68 @@ def get_ccbc_cov(
                 )
 
     return {
-        "cov_Bs_Bs":         cov_Bs_Bs,
-        "cov_Bs_Bs_constr":  cov_Bs_Bs_constr,
-        "cov_ns_ns":         cov_ns_ns,
-        "cov_ms_ms":         cov_ms_ms,
-        "cov_Ps_Ps":         cov_Ps_Ps,
-        "cov_Ps_Bs":         cov_Ps_Bs,
-        "cov_Ps_Bs_constr":  cov_Ps_Bs_constr,
-        "cov_Bs_nc":         cov_Bs_nc,
-        "cov_Ps_nc":         cov_Ps_nc,
-        "cov_nc_nc":         cov_nc_nc,
-        # Pass inputs through so downstream plot functions can access rate_cov
-        # without the caller having to re-supply them.
-        "Bs_output":         Bs_output,
-        "ns_output":         ns_output,
+        "cov_Bs_Bs":             cov_Bs_Bs,
+        "cov_Bs_Bs_constr":      cov_Bs_Bs_constr,
+        "cov_ns_ns":             cov_ns_ns,
+        "cov_ms_ms":             cov_ms_ms,
+        "cov_Ps_Ps":             cov_Ps_Ps,
+        "cov_Ps_Bs":             cov_Ps_Bs,
+        "cov_Ps_Bs_constr":      cov_Ps_Bs_constr,
+        "cov_Bs_nc":             cov_Bs_nc,
+        "cov_Ps_nc":             cov_Ps_nc,
+        "cov_nc_nc":             cov_nc_nc,
+        # Scalar (1-bin) rate-only variances — variable-independent norm percentages.
+        "norm_cov_Bs_Bs":        norm_Bs_Bs,
+        "norm_cov_Bs_Bs_constr": norm_Bs_Bs_constr,
+        "norm_cov_ns_ns":        norm_ns_ns,
+        "norm_cov_ms_ms":        norm_ms_ms,
+        # Pass inputs through so downstream functions can access them without
+        # the caller having to re-supply them.
+        "Bs_output":             Bs_output,
+        "ns_output":             ns_output,
+        "nc_output":             nc_output,
+        "pinv_nc_nc":            pinv_nc,
     }
+
+
+# ---------------------------------------------------------------------------
+# Constrained background prediction
+# ---------------------------------------------------------------------------
+
+
+def get_constrained_background(
+    ccbc_cov: dict,
+    fd_nc_hist: np.ndarray,
+) -> np.ndarray:
+    """Shift the CV background prediction using the CCBC linear predictor.
+
+    Applies the standard CCBC constraint update:
+
+    .. math::
+
+        \\hat{B}_S = B_S^{\\rm CV}
+            + C_{B_S n_C}\\, C_{n_C n_C}^{+}\\, (n_C^{\\rm FD} - n_C^{\\rm CV})
+
+    Parameters
+    ----------
+    ccbc_cov : dict
+        Output of :func:`get_ccbc_cov`.  Must contain ``"Bs_output"``,
+        ``"nc_output"``, ``"cov_Bs_nc"``, and ``"pinv_nc_nc"``.
+    fd_nc_hist : np.ndarray, shape (nbins,)
+        Fake-data control-region histogram in flux-averaged event-rate units,
+        matching ``nc_output.rate_hist_cv``
+        (i.e. ``weights_mc / (integrated_flux * mcbnb_pot / 1e6)``-weighted).
+
+    Returns
+    -------
+    np.ndarray, shape (nbins,)
+        Constrained background prediction.  May be negative in extreme
+        fake-data scenarios; clamp or inspect as needed.
+    """
+    cv_Bs = np.asarray(ccbc_cov["Bs_output"].rate_hist_cv)
+    cv_nc = np.asarray(ccbc_cov["nc_output"].rate_hist_cv)
+    shift = ccbc_cov["cov_Bs_nc"] @ ccbc_cov["pinv_nc_nc"] @ (np.asarray(fd_nc_hist) - cv_nc)
+    return cv_Bs + shift
 
 
 # ---------------------------------------------------------------------------
@@ -466,8 +591,8 @@ def plot_ccbc_constraint(
 
         label_pre_Bs  = f"Pre-constraint ({np.sqrt(np.sum(pre_cov_Bs))  / np.sum(Bs_hist) * 100:.1f}%)"
         label_post_Bs = f"Post-constraint ({np.sqrt(np.sum(post_cov_Bs)) / np.sum(Bs_hist) * 100:.1f}%)"
-        label_pre_ns  = f"Pre-constraint ({np.sqrt(np.sum(pre_cov_ns))  / np.sum(ns_hist) * 100:.1f}%)"
-        label_post_ns = f"Post-constraint ({np.sqrt(np.sum(post_cov_ns)) / np.sum(ns_hist) * 100:.1f}%)"
+        label_pre_ns  = f"Pre-constraint ({np.sqrt(cov['norm_cov_ns_ns'])  / np.sum(ns_hist) * 100:.1f}%)"
+        label_post_ns = f"Post-constraint ({np.sqrt(cov['norm_cov_ms_ms']) / np.sum(ns_hist) * 100:.1f}%)"
 
         # Row 1: B_S main
         axes_Bs_main[i].stairs(Bs_hist, bins, color="black", label=r"$B_S^{CV}$")
@@ -644,14 +769,14 @@ def plot_ccbc_summary(
     stat_ratio_Bs = stat_err_Bs / Bs_hist
     stat_ratio_ns = stat_err_ns / ns_hist
 
-    label_pre_Bs  = f"Pre-constraint ({np.sqrt(np.sum(pre_cov_Bs))  / np.sum(Bs_hist) * 100:.1f}%)"
-    label_post_Bs = f"Post-constraint ({np.sqrt(np.sum(post_cov_Bs)) / np.sum(Bs_hist) * 100:.1f}%)"
-    label_pre_ns  = f"Pre-constraint ({np.sqrt(np.sum(pre_cov_ns))  / np.sum(ns_hist) * 100:.1f}%)"
-    label_post_ns = f"Post-constraint ({np.sqrt(np.sum(post_cov_ns)) / np.sum(ns_hist) * 100:.1f}%)"
+    label_pre_Bs  = f"Pre-constraint ({np.sqrt(ccbc_cov['norm_cov_Bs_Bs'] * scale_sq)  / np.sum(Bs_hist) * 100:.1f}%)"
+    label_post_Bs = f"Post-constraint ({np.sqrt(ccbc_cov['norm_cov_Bs_Bs_constr'] * scale_sq) / np.sum(Bs_hist) * 100:.1f}%)"
+    label_pre_ns  = f"Pre-constraint  ({np.sqrt(ccbc_cov['norm_cov_ns_ns'] * scale_sq)  / np.sum(ns_hist) * 100:.1f}%)"
+    label_post_ns = f"Post-constraint ({np.sqrt(ccbc_cov['norm_cov_ms_ms'] * scale_sq) / np.sum(ns_hist) * 100:.1f}%)"
 
     if axes is None:
         fig = plt.figure(figsize=(10, 5))
-        gs  = GridSpec(2, 2, height_ratios=[4, 1], hspace=0.35, wspace=0.25)
+        gs  = GridSpec(2, 2, height_ratios=[4, 1], hspace=0.2, wspace=0.25)
         ax_bs_main  = fig.add_subplot(gs[0, 0])
         ax_ns_main  = fig.add_subplot(gs[0, 1])
         ax_bs_ratio = fig.add_subplot(gs[1, 0])
@@ -744,6 +869,164 @@ def plot_ccbc_summary(
         ax.tick_params(axis="y", labelsize=8)
 
     return fig, axes
+
+
+def plot_ccbc_fd_comparison(
+    ccbc_cov: dict,
+    fd_nc_hist: np.ndarray,
+    fd_ns_hist: np.ndarray,
+    fd_Bs_hist: np.ndarray,
+    ns_hist: np.ndarray,
+    var_config: VariableConfig,
+    axes: np.ndarray | None = None,
+    color_pre: str = "C3",
+    color_post: str = "C0",
+) -> tuple[plt.Figure, np.ndarray, dict]:
+    """Two-panel comparison of unconstrained and constrained predictions vs fake data.
+
+    Left panel shows the unconstrained total signal-region prediction
+    (labelled :math:`n_S`); right panel shows the CCBC-constrained prediction
+    (labelled :math:`m_S`).  Each panel contains:
+
+    * A filled ±1σ systematic uncertainty band around the prediction.
+    * A dash-dot line for the background prediction (B_S^CV on the left;
+      B̂_S on the right).
+    * A dashed gray line for the true reweighted background (``fd_Bs_hist``).
+    * Errorbar points for the fake-data total (``fd_ns_hist``), labelled :math:`D_S`.
+    * A chi-squared text annotation placed outside the legend.
+
+    All inputs must be in **flux-averaged event-rate units**
+    (``weights_mc / (integrated_flux * mcbnb_pot / 1e6)``), consistent with
+    :class:`~nueana.classes.SystematicsOutput` and the outputs of
+    :func:`~nueana.fdt.make_fake_data_hists`.
+
+    Parameters
+    ----------
+    ccbc_cov : dict
+        Output of :func:`get_ccbc_cov`.  Must contain ``Bs_output``,
+        ``cov_Bs_nc``, ``pinv_nc_nc``, ``cov_ns_ns``, and ``cov_ms_ms``.
+    fd_nc_hist : np.ndarray, shape (nbins,)
+        Fake-data control-region histogram in flux-averaged units.
+        Passed to :func:`get_constrained_background` to derive B̂_S.
+        Use ``fd_nc`` from :func:`~nueana.fdt.make_fake_data_hists`.
+    fd_ns_hist : np.ndarray, shape (nbins,)
+        Fake-data total signal-region histogram in flux-averaged units
+        (before background subtraction).  Plotted as :math:`D_S`.
+        Use ``fd_ns`` from :func:`~nueana.fdt.make_fake_data_hists`.
+    fd_Bs_hist : np.ndarray, shape (nbins,)
+        True reweighted background histogram in flux-averaged units.
+        Plotted as the "true background" reference line.
+        Use ``fd_Bs`` from :func:`~nueana.fdt.make_fake_data_hists`.
+    ns_hist : np.ndarray, shape (nbins,)
+        CV total signal-region prediction (P_S + B_S) in flux-averaged units
+        (e.g. ``ns_output.rate_hist_cv``).
+    var_config : VariableConfig
+        Bin edges and axis labels.
+    axes : array-like of two Axes, optional
+        Pre-existing (2,) axes array.  A new figure with ``sharey=True`` is
+        created if not provided.
+    color_pre : str, default ``"C3"``
+        Colour for the unconstrained prediction and its band.
+    color_post : str, default ``"C0"``
+        Colour for the constrained prediction and its band.
+
+    Returns
+    -------
+    fig : plt.Figure
+    axes : np.ndarray, shape (2,)
+        ``axes[0]`` — unconstrained (:math:`n_S`) panel
+        ``axes[1]`` — constrained (:math:`m_S`) panel
+    result : dict
+        ``chisq_pre``      — χ² of the unconstrained prediction vs ``fd_ns_hist``
+        ``chisq_post``     — χ² of the constrained prediction vs ``fd_ns_hist``
+        ``ndof``           — number of bins used as the χ² degrees of freedom
+        ``constrained_ns`` — constrained total prediction in flux-averaged units
+        ``constrained_Bs`` — constrained background prediction in flux-averaged units
+    """
+    Bs_cv          = np.asarray(ccbc_cov["Bs_output"].rate_hist_cv)
+    constrained_Bs = get_constrained_background(ccbc_cov, fd_nc_hist)
+    constrained_ns = ns_hist + (constrained_Bs - Bs_cv)
+
+    cov_pre  = np.asarray(ccbc_cov["cov_ns_ns"])
+    cov_post = np.asarray(ccbc_cov["cov_ms_ms"])
+    err_pre  = np.sqrt(np.diag(cov_pre))
+    err_post = np.sqrt(np.diag(cov_post))
+
+    chisq_pre  = get_chisq_diff(fd_ns_hist - ns_hist,        cov_pre)
+    chisq_post = get_chisq_diff(fd_ns_hist - constrained_ns, cov_post)
+    ndof = len(ns_hist)
+
+    try:
+        from scipy.stats import chi2 as _chi2
+        def _chisq_str(chisq: float, sub: str) -> str:
+            p = 1.0 - _chi2.cdf(chisq, df=ndof)
+            return rf"$\chi^2_{{\rm {sub}}}$/dof = {chisq:.1f}/{ndof}, $p$ = {p:.2g}"
+    except Exception:
+        def _chisq_str(chisq: float, sub: str) -> str:
+            return rf"$\chi^2_{{\rm {sub}}}$/dof = {chisq:.1f}/{ndof}"
+
+    bins    = var_config.bins
+    centers = var_config.bin_centers
+
+    if axes is None:
+        fig, axes = plt.subplots(1, 2, figsize=(10, 4), sharey=True)
+    else:
+        axes = np.asarray(axes)
+        fig  = axes[0].get_figure()
+
+    panels = [
+        (axes[0], ns_hist,        err_pre,  Bs_cv,          r"$B_S^{\rm CV}$", chisq_pre,  color_pre,  "unconstrained", r"$n_S = \phi_S^{\rm CV} + B_S^{\rm CV}$", "pre"),
+        (axes[1], constrained_ns, err_post, constrained_Bs, r"$B_S^{\rm constr}$",    chisq_post, color_post,   "constrained", r"$m_S = \phi_S^{\rm CV} + B_S^{\rm constr}$",   "post"),
+    ]
+    for ax, pred, err, Bs_pred, Bs_label, chisq, color, title, label, sub in panels:
+        ax.set_title(title, fontsize=12)
+        ax.stairs(pred, bins, color=color, lw=1.5, label=label)
+        ax.fill_between(
+            bins, _repeat(pred - err), _repeat(pred + err),
+            step="pre", color=color, alpha=0.25, label=r"MC stat.+syst.",
+        )
+        ax.stairs(Bs_pred,    bins, color=color,  lw=1.2, ls="-.", label=Bs_label)
+        ax.stairs(fd_Bs_hist, bins, color="gray", lw=1.2, ls="--", label=r"true $B_S$")
+        ax.errorbar(centers, fd_ns_hist, fmt="ko", ms=5, label=r"$D_S$")
+        ax.set_xlabel(var_config.var_labels[1], )
+        ax.set_xticks(bins)
+        ax.set_xticklabels(var_config.bin_labels, )
+        ax.tick_params(axis="y", labelsize=8)
+        ax.legend(fontsize=9)
+
+    axes[0].set_ylabel("Flux-Averaged Event Rate")
+    axes[1].tick_params(axis="y", labelleft=True)
+
+    # Anchor chi-squared annotations just below each legend using the rendered
+    # bounding box — mirrors the plot_mc_data pattern in plotting.py.
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    for ax, (_, _, _, _, _, chisq, _, _, _, sub) in zip(axes, panels):
+        leg = ax.get_legend()
+        if leg is not None:
+            bb           = leg.get_window_extent(renderer).transformed(ax.transAxes.inverted())
+            anchor_right = bb.x0 > 0.5
+            ann_x        = bb.x1 if anchor_right else bb.x0
+            ann_y        = bb.y0
+            ann_ha       = "right" if anchor_right else "left"
+        else:
+            ann_x, ann_y, ann_ha = 0.97, 0.55, "right"
+        ax.annotate(
+            _chisq_str(chisq, sub),
+            xy=(ann_x, ann_y),
+            xycoords=ax.transAxes,
+            xytext=(0, -4),
+            textcoords="offset points",
+            ha=ann_ha, va="top", 
+        )
+
+    return fig, axes, {
+        "chisq_pre":      chisq_pre,
+        "chisq_post":     chisq_post,
+        "ndof":           ndof,
+        "constrained_ns": constrained_ns,
+        "constrained_Bs": constrained_Bs,
+    }
 
 
 def plot_ccbc_blocks(
