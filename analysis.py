@@ -353,7 +353,7 @@ def electron_energy() -> VariableConfig:
     """VariableConfig for primary electron energy (GeV)."""
     return VariableConfig(
         var_save_name="energy",
-        var_plot_name=r"E_{e-}",
+        var_plot_name="$E_{e-}$",
         var_unit="GeV",
         bins=np.array([0.5, 0.7, 0.95, 1.25, 1.7, 2.5]),
         bin_labels=np.array([0.5, 0.7, 0.95, 1.25, 1.7, 5]),
@@ -367,7 +367,7 @@ def electron_direction() -> VariableConfig:
     """VariableConfig for primary electron direction (cos theta)."""
     return VariableConfig(
         var_save_name="direction",
-        var_plot_name=r"\cos\theta_{e-}",
+        var_plot_name="$\\cos\\theta_{e-}$",
         var_unit="",
         bins=np.array([0.5, 0.6, 0.75, 0.85, 0.925, 1.0]),
         bin_labels=np.array([-1.0, 0.6, 0.75, 0.85, 0.925, 1.0]),

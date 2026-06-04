@@ -253,9 +253,9 @@ def plot_var(indf: pd.DataFrame,
     _weight_col = _get_weight_column(indf)
 
     if ax is None: ax = plt.gca()
-    if categories_kwarg is not None: categories = categories_kwarg
-    elif pdg:      categories = pdg_categories
+    if pdg:        categories = pdg_categories
     elif mode:     categories = mode_categories
+    elif categories_kwarg is not None: categories = categories_kwarg
     else:          categories = signal_categories
     ncategories = len(categories)
     if hatch == None: hatch = [""]*ncategories
