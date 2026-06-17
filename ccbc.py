@@ -1089,6 +1089,7 @@ def plot_ccbc_blocks(
         fig = axes[0].get_figure()
 
     sns.heatmap(combined_frac_cov, cmap="mako", ax=axes[0],
+                annot=True, fmt=".2f", annot_kws={"fontsize": 8},
                 cbar_kws={"label": "Fractional Covariance"})
     sns.heatmap(combined_corr, cmap="Spectral", ax=axes[1],
                 annot=True, fmt=".2f", annot_kws={"fontsize": 8},

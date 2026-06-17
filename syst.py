@@ -735,23 +735,15 @@ def get_syst_df(dicts: list, cv_hist: np.ndarray) -> pd.DataFrame:
     records = []
 
     N_tot  = float(np.sum(cv_hist))
-    cv_sum = float(np.sum(cv_hist))
     for d in dicts:
         for raw_key in d:
             cov      = d[raw_key]['cov']
             unc_diag = np.sqrt(np.diag(cov)) / cv_hist
 
-            # Use the variance of the total-count scalar across universes rather
-            # than sum(cov).  For rate histograms the two are algebraically
-            # identical; for xsec histograms this is the single-bin convention
-            # and avoids per-bin efficiency averaging artefacts.
-            if 'hists' in d[raw_key]:
-                h_sum    = np.asarray(d[raw_key]['hists']).sum(axis=0)
-                dev      = h_sum - cv_sum
-                norm_var = float(np.dot(dev, dev) / max(len(dev), 1))
-            else:
-                norm_var = max(0.0, float(np.sum(cov)))
-            unc_norm = float(np.sqrt(norm_var) / N_tot) if N_tot > 0 else 0.0
+            cov_sum = float(np.sum(cov))
+            if cov_sum < 0:
+                cov_sum = 0.0
+            unc_norm = float(np.sqrt(cov_sum) / N_tot) if N_tot > 0 else 0.0
 
             category = _classify_category(raw_key)
             if category is None:
