@@ -11,7 +11,7 @@ from .selection import select_sideband
 from .utils import get_hist1d
 from .syst import calc_matrices, get_syst, get_syst_df, get_detvar_systs
 from .detvar import load_detvar_dict
-from .classes import SystematicsOutput, XSecInputs
+from .classes import SystematicsOutput, SystematicsInput, XSecInputs
 from .analysis import integrated_flux, signal_dict, POT_NORM_UNC, NTARGETS_UNC
 from .preprocess import preprocess_mc, add_pi0
 from . import config
@@ -25,6 +25,7 @@ __all__ = [
     'get_intime_cov',
     'get_total_cov',
     'load_detvar_dicts',
+    'get_data_mc_ratio'
 ]
 
 
@@ -584,3 +585,120 @@ def get_total_cov(reco_df, reco_var, bins, mcbnb_pot,
                                      sum_value=float(np.mean(intime_unc_xsec)))
 
     return result
+
+
+def get_data_mc_ratio(
+    mc_df: pd.DataFrame,
+    data_df: pd.DataFrame,
+    systs: SystematicsInput | bool | None = None,
+    scale: float = 1.0,
+) -> dict:
+    """Integrated Data/MC ratio with stat and syst errors.
+
+    Computes one integrated number per dataframe pair. To get per-TPC (or any
+    other split) numbers, filter ``mc_df`` and ``data_df`` outside and call
+    this once per slice.
+
+    Data total is ``len(data_df)``; MC total is the sum of ``weights_mc`` (or
+    ``len(mc_df)`` if no weight column). MC stat variance is
+    ``sum(weights_mc**2)``. Systematics are computed internally via a
+    single-bin histogram on the ``signal`` column (always present after
+    :func:`~nueana.analysis.define_signal`).
+
+    Parameters
+    ----------
+    mc_df, data_df : pd.DataFrame
+    systs : SystematicsInput, True, or None
+        Mirrors :func:`~nueana.plotting.plot_var`:
+
+        - :class:`SystematicsInput` → calls :func:`get_total_cov` with a
+          single bin; gives the full uncertainty (GENIE+Flux+G4+DetVar+norm).
+        - ``True`` → reads universe columns from ``mc_df`` via
+          :func:`~nueana.syst.get_syst`; reweight-only (GENIE+Flux+G4).
+        - ``None`` → MC stat error only.
+    scale : float, default 1.0
+        Multiplicative factor applied to MC counts (and ``scale**2`` to MC
+        variances). Use to bring MC to the data POT. For the
+        :class:`SystematicsInput` path this is applied on top of the
+        POT/flux scale derived from ``systs.mcbnb_pot``.
+
+    Returns
+    -------
+    dict with keys
+        ``data``, ``mc``, ``ratio``, ``stat_err``, ``syst_err``, ``total_err``.
+        Errors are absolute on the ratio. ``stat_err`` combines data Poisson
+        and MC stat in quadrature.
+    """
+    # Locate weights_mc column (flat or MultiIndex) — same helper logic as plotting.
+    _weight_col = None
+    for col in mc_df.columns:
+        if isinstance(col, tuple) and col[0] == 'weights_mc':
+            _weight_col = col; break
+        if not isinstance(col, tuple) and col == 'weights_mc':
+            _weight_col = col; break
+
+    weights = mc_df[_weight_col] if _weight_col is not None else None
+    if weights is not None:
+        mc_total_raw    = float(weights.sum())
+        mc_stat_var_raw = float(np.sum(np.square(weights)))
+    else:
+        mc_total_raw    = float(len(mc_df))
+        mc_stat_var_raw = float(len(mc_df))  # Poisson on unweighted counts
+
+    data_total = float(len(data_df))
+
+    # Single-bin histogram inputs for the systematics path. The 'signal' column
+    # is always present after define_signal(); the wide range guarantees every
+    # row falls in the one bin.
+    _var = 'signal'
+    _bins = np.array([-1e9, 1e9])
+
+    if isinstance(systs, SystematicsInput) or type(systs).__name__ == 'SystematicsInput':
+        out = get_total_cov(reco_df=mc_df, reco_var=_var, bins=_bins, **systs.to_kwargs())
+        hist_scale = integrated_flux * (systs.mcbnb_pot / 1e6) * scale
+        mc_total    = mc_total_raw * hist_scale
+        rate_cov    = np.asarray(out.rate_cov) * hist_scale**2
+        total_var   = float(rate_cov.sum())
+        mcstat_key  = next((k for k in out.rate_syst_dict if str(k).lower() == 'mcstat'), None)
+        if mcstat_key is not None:
+            mcstat_var_scaled = float(np.asarray(out.rate_syst_dict[mcstat_key]['cov']).sum() * hist_scale**2)
+        else:
+            mcstat_var_scaled = mc_stat_var_raw * hist_scale**2
+            total_var += mcstat_var_scaled
+        syst_only_var = max(0.0, total_var - mcstat_var_scaled)
+        mc_stat_var_final = mcstat_var_scaled
+    elif systs is True:
+        found = any('univ_' in '_'.join(list(col)) for col in mc_df.columns if isinstance(col, tuple))
+        if not found:
+            print("systs=True but no universe columns found; computing stat error only")
+            syst_only_var = 0.0
+        else:
+            syst_dict = get_syst(reco_df=mc_df, reco_var=_var, bins=_bins, scale=False)
+            syst_only_var = float(sum(np.asarray(syst_dict[k]['cov']).sum() for k in syst_dict)) * scale**2
+        mc_total = mc_total_raw * scale
+        mc_stat_var_final = mc_stat_var_raw * scale**2
+    else:
+        mc_total = mc_total_raw * scale
+        mc_stat_var_final = mc_stat_var_raw * scale**2
+        syst_only_var = 0.0
+
+    if mc_total > 0:
+        ratio          = data_total / mc_total
+        data_err_r     = np.sqrt(data_total)      * (1.0   / mc_total)
+        mcstat_err_r   = np.sqrt(mc_stat_var_final) * (ratio / mc_total)
+        stat_err       = float(np.sqrt(data_err_r**2 + mcstat_err_r**2))
+        syst_err       = float(np.sqrt(syst_only_var) * (ratio / mc_total))
+        total_err      = float(np.sqrt(stat_err**2 + syst_err**2))
+    else:
+        ratio = stat_err = syst_err = total_err = np.nan
+
+    print(f"Data/MC = {ratio:.2f} $\pm$ {stat_err:.2f} (stat.) $\pm$ {syst_err:.2f} (syst.)")
+
+    return {
+        'data': data_total,
+        'mc': mc_total,
+        'ratio': ratio,
+        'stat_err': stat_err,
+        'syst_err': syst_err,
+        'total_err': total_err,
+    }
