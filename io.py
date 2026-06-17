@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import gc
 import pickle
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -10,6 +11,7 @@ import pandas as pd
 from .classes import SystematicsOutput
 
 __all__ = ['get_n_split', 'print_keys', 'load_dfs', 'load_mc', 'load_data',
+           'subset_to_pot', 'filter_by_runs',
            'save_signal_checkpoint', 'load_signal_checkpoint',
            'save_sideband_checkpoint', 'load_sideband_checkpoint']
 
@@ -242,6 +244,89 @@ def load_data(
 
     sel = select(df, cuts=cuts) if cuts is not None else df
     return sel, pot, ngates
+
+
+# ---------------------------------------------------------------------------
+# POT subsetting
+# ---------------------------------------------------------------------------
+
+def subset_to_pot(hdr_df: pd.DataFrame, target_pot: float) -> tuple:
+    """Select runs in ascending order until target_pot is reached.
+
+    Runs are identified by ``first_in_subrun == 1`` rows in *hdr_df* and
+    accumulated in ascending run-number order.  The loop stops as soon as the
+    running total first meets or exceeds *target_pot*, so the returned POT may
+    exceed *target_pot* by at most one run's worth.  If the file contains less
+    than *target_pot* total, all runs are selected.
+
+    Use :func:`filter_by_runs` to apply the returned *hdr_filtered* to any
+    other DataFrame sharing the same index levels (raw *nuecc* from
+    :func:`load_dfs`, or the post-processed event DataFrame from
+    :func:`load_mc` / :func:`load_data`).
+
+    Parameters
+    ----------
+    hdr_df : pd.DataFrame
+        Header DataFrame with ``run``, ``pot``, and ``first_in_subrun``
+        columns, indexed by ``(__ntuple, entry, ...)``.
+    target_pot : float
+        Target exposure in protons-on-target.
+
+    Returns
+    -------
+    hdr_filtered : pd.DataFrame
+        *hdr_df* rows restricted to the selected runs.
+    actual_pot : float
+        Cumulative POT of the selected runs.
+    """
+    run_pot = (
+        hdr_df.loc[hdr_df['first_in_subrun'] == 1, ['run', 'pot']]
+        .sort_values('run')
+    )
+
+    cumsum = 0.0
+    selected: set[int] = set()
+    for _, row in run_pot.iterrows():
+        selected.add(int(row['run']))
+        cumsum += row['pot']
+        if cumsum >= target_pot:
+            break
+
+    if cumsum < target_pot:
+        warnings.warn(
+            f"subset_to_pot: file only contains {cumsum:.3e} POT but "
+            f"target_pot={target_pot:.3e} — all runs were selected.",
+            stacklevel=2,
+        )
+    return hdr_df[hdr_df['run'].astype(int).isin(selected)], cumsum
+
+
+def filter_by_runs(df: pd.DataFrame, hdr_filtered: pd.DataFrame) -> pd.DataFrame:
+    """Filter *df* to events whose run number appears in *hdr_filtered*.
+
+    Designed to pair with :func:`subset_to_pot`.  Filters by the ``run``
+    column, which is unambiguous across the hdr and nuecc table index
+    structures.  Works for post-processed event DataFrames from
+    :func:`load_mc` / :func:`load_data` (where ``run`` is a flat or
+    top-level MultiIndex column after :func:`~nueana.utils.merge_hdr`).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Event DataFrame with a ``run`` column (flat or top-level MultiIndex).
+    hdr_filtered : pd.DataFrame
+        Filtered header returned by :func:`subset_to_pot`.
+
+    Returns
+    -------
+    pd.DataFrame
+        *df* restricted to runs present in *hdr_filtered*.
+    """
+    selected_runs = set(hdr_filtered['run'].astype(int))
+    run_col = df['run']
+    if isinstance(run_col, pd.DataFrame):
+        run_col = run_col.iloc[:, 0]
+    return df[run_col.astype(int).isin(selected_runs)]
 
 
 # ---------------------------------------------------------------------------
