@@ -46,6 +46,10 @@ from .syst import get_syst
 from .utils import get_hist1d
 from .classes import PlottingConfig, VariableConfig, SystematicsInput, SystematicsOutput
 
+# Kept above any per-plot zorder used for stairs, error bands, cut lines, and data
+# markers so legends and annotations always sit on top of cut_val dashed lines.
+_TEXT_ZORDER = 10_000
+
 def _get_weight_column(df: pd.DataFrame):
     """Return the weights_mc column key in df (flat or MultiIndex), or None."""
     for col in df.columns:
@@ -78,7 +82,8 @@ def annotate_sbnd(ax, internal=True):
         If True, stamp "SBND Internal". If False, stamp "SBND Analysis In Progress".
     """
     label = "SBND Internal" if internal else "SBND Analysis In Progress"
-    ax.annotate(label, xy=(0.0, 1.02), xycoords='axes fraction', ha='left', color='gray', fontweight='bold')
+    ax.annotate(label, xy=(0.0, 1.02), xycoords='axes fraction', ha='left',
+                color='gray', fontweight='bold', zorder=_TEXT_ZORDER)
     # ax.annotate("GENIE v3.40 AR23_00i_00_000", xy=(1.0, 1.02), xycoords='axes fraction', ha='right', color='gray')
 
 
@@ -113,6 +118,8 @@ def annotate_chisq(
     if not np.isfinite(chisq):
         return
     p_str = f"{chi2_dist.sf(chisq, ndof):.2g}" if chi2_dist is not None else "N/A"
+    kwargs.setdefault('zorder', _TEXT_ZORDER)
+    kwargs.setdefault('bbox', dict(boxstyle='round,pad=0.1', facecolor='white', edgecolor='none', alpha=0.5))
     ax.annotate(
         rf"$\chi^2$/ndf = {chisq:.1f}/{ndof}, $p$ = {p_str}",
         xy=xy,
@@ -364,6 +371,7 @@ def plot_var(indf: pd.DataFrame,
     #   True              → read universe columns from df; MCstat separate if no MCstat universe.
     #   None/else         → MC stat error only.
     _mcstat_err_annot = None  # populated in SystematicsInput/Output blocks when MCstat key present
+    _syst_source = 'none'  # 'none' | 'reweight_only' | 'full' — tags scope of the syst band
 
     def _apply_syst_output(output, hist_scale):
         """Shared logic for SystematicsInput and SystematicsOutput paths."""
@@ -383,6 +391,7 @@ def plot_var(indf: pd.DataFrame,
         _output = get_total_cov(reco_df=indf, reco_var=var, bins=bins, **systs.to_kwargs())
         _hist_scale = integrated_flux * (systs.mcbnb_pot/1e6)
         total_cov, systs_arr, syst_dict, calc_separate_mcstat = _apply_syst_output(_output, _hist_scale)
+        _syst_source = 'full'
 
     elif isinstance(systs, SystematicsOutput) or type(systs).__name__ == 'SystematicsOutput':
         # Case 2: caller already ran get_total_cov and passes the result directly.
@@ -390,6 +399,7 @@ def plot_var(indf: pd.DataFrame,
             raise ValueError("SystematicsOutput.mcbnb_pot is not set; use get_total_cov to produce it")
         _hist_scale = integrated_flux * (systs.mcbnb_pot/1e6)
         total_cov, systs_arr, syst_dict, calc_separate_mcstat = _apply_syst_output(systs, _hist_scale)
+        _syst_source = 'full'
 
     elif systs is True:
         # Case 3: inherit systematics from universe columns in the dataframe.
@@ -406,6 +416,7 @@ def plot_var(indf: pd.DataFrame,
                 total_cov += syst_dict[key]['cov']
             systs_arr = np.sqrt(np.clip(np.diag(total_cov), a_min=0.0, a_max=None))
             calc_separate_mcstat = not has_mcstat
+            _syst_source = 'reweight_only'
 
     else:
         # Case 4: systs=None — no systematics; only MC stat error is shown.
@@ -468,9 +479,11 @@ def plot_var(indf: pd.DataFrame,
             # stats_err is zero so combined reduces to systs_err unchanged.
             combined_err = np.sqrt(systs_err**2 + stats_err**2)
             _combined = np.append(combined_err[0], combined_err)
+            _band_label = ("MC stat.+syst.\n(GENIE+Flux+G4)"
+                           if _syst_source == 'reweight_only' else "MC stat.+syst.")
             ax.fill_between(bins,
                             steps[-1] - _combined, steps[-1] + _combined,
-                            **systs_options, label="MC stat.+syst.")
+                            **systs_options, label=_band_label)
         else:
             # systs=None — stat error only.
             ax.fill_between(bins,
@@ -487,6 +500,7 @@ def plot_var(indf: pd.DataFrame,
     syst_dict['__stats_err__']        = stats_err
     syst_dict['__systs_err__']        = systs_err
     syst_dict['__separate_errors__']  = calc_separate_mcstat
+    syst_dict['__syst_source__']      = _syst_source
     # MCstat for annotation: from the SystematicsInput path if available, else stats_err.
     syst_dict['__mcstat_err__']       = _mcstat_err_annot if _mcstat_err_annot is not None else stats_err
 
@@ -507,7 +521,7 @@ def plot_var(indf: pd.DataFrame,
     if legend_kwargs:
         default_legend_kwargs.update(legend_kwargs)
     legend = ax.legend(**default_legend_kwargs)
-    legend.set_zorder(cut_line_zorder + 1)
+    legend.set_zorder(_TEXT_ZORDER)
 
     return bins, steps, total_err, syst_dict
 
@@ -609,6 +623,9 @@ def plot_mc_data(mc_df: pd.DataFrame,
         Figure size passed to ``plt.figure``.
     ratio_min, ratio_max : float, default (0.0, 2.0)
         y-axis limits for the ratio subplot.
+    ylim_scale : float, default 1.5
+        Multiply the auto upper y-limit of the main panel by this factor.
+        Set to 1.0 to leave the y-axis unchanged.
     annot : bool, default True
         If True, annotate the main axis with the integrated Data/MC ratio and
         the chi-squared / p-value.
@@ -634,6 +651,7 @@ def plot_mc_data(mc_df: pd.DataFrame,
     _p.update(kwargs)
     ratio_min  = _p.get('ratio_min', ratio_min)
     ratio_max  = _p.get('ratio_max', ratio_max)
+    ylim_scale = _p.get('ylim_scale', 1.5)
     data_first = _p.get('data_first', data_first)
     fig = plt.figure(figsize=figsize)
     gs = GridSpec(2, 1, height_ratios=[6, 1], hspace=0.05)
@@ -659,8 +677,10 @@ def plot_mc_data(mc_df: pd.DataFrame,
         # error in ratio is just (data error) / (mc bin content)
         ratio_err = data_err / mc_tot
         # error in shading should just be (mc error) / (mc bin content)
-        mc_contribution = mc_err/mc_tot
-        # shading is around unity    
+        # Use 0 for zero-MC bins: NaN here causes fill_between(step="pre") to
+        # offset the entire band one bin to the right for all subsequent bins.
+        mc_contribution = np.where(mc_tot > 0, mc_err / mc_tot, 0.0)
+        # shading is around unity
         ps_err = 1 + np.append(mc_contribution[0],mc_contribution)
         ms_err = 1 - np.append(mc_contribution[0],mc_contribution)
 
@@ -756,19 +776,20 @@ def plot_mc_data(mc_df: pd.DataFrame,
     ann_ha = 'right' if anchor_right else 'left'
 
     if annot:
-        ax_main.annotate(rf"$\Sigma$ Data/Pred = {total_ratio:.2f} $\pm$ {total_ratio_stat_err:.2f} (stat.) $\pm$ {total_ratio_syst_err:.2f} (syst.)",
-                        xy=(ann_x, ann_y),
-                        xycoords=ax_main.transAxes,
-                        xytext=(0, -6),
-                        textcoords='offset points',
-                        ha=ann_ha, va='top', fontsize=ann_fontsize)
-        
-        annotate_chisq(ax_main, chi2, ndf,
-                       xy=(ann_x, ann_y),
-                       xycoords=ax_main.transAxes,
-                       xytext=(0, -20),
-                       textcoords='offset points',
-                       ha=ann_ha, va='top', fontsize=ann_fontsize)
+        ann_lines = [rf"$\Sigma$ Data/Pred = {total_ratio:.2f} $\pm$ {total_ratio_stat_err:.2f} (stat.) $\pm$ {total_ratio_syst_err:.2f} (syst.)"]
+        if np.isfinite(chi2):
+            p_str = f"{chi2_dist.sf(chi2, ndf):.2g}" if chi2_dist is not None else "N/A"
+            ann_lines.append(rf"$\chi^2$/ndf = {chi2:.1f}/{ndf}, $p$ = {p_str}")
+        ax_main.annotate(
+            "\n".join(ann_lines),
+            xy=(ann_x, ann_y),
+            xycoords=ax_main.transAxes,
+            xytext=(0, -6),
+            textcoords='offset points',
+            ha=ann_ha, va='top', fontsize=ann_fontsize,
+            zorder=_TEXT_ZORDER,
+            bbox=dict(boxstyle='round,pad=0.2', facecolor='white', edgecolor='none', alpha=0.5),
+        )
 
     if bin_labels is not None:
         ax_main.set_xticks(bins)
@@ -781,6 +802,9 @@ def plot_mc_data(mc_df: pd.DataFrame,
     ax_sub.yaxis.set_minor_locator(mpl.ticker.AutoMinorLocator())
 
 
+    if ylim_scale != 1.0:
+        ax_main.set_ylim(top=ax_main.get_ylim()[1] * ylim_scale)
+
     if data_first:
         handles, labels = ax_main.get_legend_handles_labels()
         idx = next((i for i, l in enumerate(labels) if l.startswith('data')), None)
@@ -788,7 +812,7 @@ def plot_mc_data(mc_df: pd.DataFrame,
             order = [idx] + [i for i in range(len(labels)) if i != idx]
             _leg_kw = {'ncol': 2, 'loc': 'upper right'}
             _leg_kw.update(_p.get('legend_kwargs') or {})
-            ax_main.legend([handles[i] for i in order], [labels[i] for i in order], **_leg_kw)
+            ax_main.legend([handles[i] for i in order], [labels[i] for i in order], **_leg_kw).set_zorder(_TEXT_ZORDER)
 
     annotate_sbnd(ax_main, internal=_p.get('internal', True))
 
@@ -915,6 +939,7 @@ def plot_syst_category_breakdown(
     xsec: bool = False,
     show_cv: bool = False,
     projected_pot: float = 1e20,
+    group_by: str = 'category',
 ) -> tuple[plt.Figure, np.ndarray, list, list]:
     """Plot the category-level systematics summary for any number of variables.
 
@@ -926,6 +951,8 @@ def plot_syst_category_breakdown(
         ``(SystematicsOutput, bins, xlabel, bin_labels)``.
     category_dict : dict
         Mapping of category name → style dict (``color``, ``label``, ``line``).
+        When ``group_by='subcategory'``, keys are subcategory names (e.g.
+        ``'PMT'``, ``'WireMod'``, ``'SCE'``, ``'calorimetry'``).
     region_label : str, default "Signal Region"
         Text stamped in the corner of each subplot.
     figsize : tuple, optional
@@ -938,6 +965,9 @@ def plot_syst_category_breakdown(
         (right) as a semi-transparent filled band.
     projected_pot : float, default 1e20
         POT used to scale the CV histogram to predicted event counts.
+    group_by : str, default 'category'
+        Column to group by: ``'category'`` (GENIE, Flux, MCstat, DetVar, …) or
+        ``'subcategory'`` (PMT, WireMod, SCE, calorimetry, other for DetVar rows).
 
     Returns
     -------
@@ -982,8 +1012,8 @@ def plot_syst_category_breakdown(
             ax_cv.set_zorder(ax.get_zorder() - 1)
             ax.set_facecolor('none')
 
-        cat    = syst_df.sort_values('unc_norm').groupby('category')['unc_diag'].apply(_combine_syst_uncertainties)
-        sums   = syst_df.groupby('category')['unc_norm'].apply(lambda s: float(np.sqrt(np.sum(s**2))))
+        cat    = syst_df.sort_values('unc_norm').groupby(group_by)['unc_diag'].apply(_combine_syst_uncertainties)
+        sums   = syst_df.groupby(group_by)['unc_norm'].apply(lambda s: float(np.sqrt(np.sum(s**2))))
         cats_per_var.append(cat)
         cat_sums_per_var.append(sums)
 
@@ -1029,6 +1059,7 @@ def plot_syst_breakdown(
     region_label: str | None = None,
     figsize: tuple[int, int] | None = None,
     xsec: bool = False,
+    subcategory: str | None = None,
 ) -> tuple[plt.Figure, np.ndarray]:
     """Plot the per-source systematics breakdown for one category.
 
@@ -1039,16 +1070,26 @@ def plot_syst_breakdown(
         ``(SystematicsOutput, bins, xlabel)`` or
         ``(SystematicsOutput, bins, xlabel, bin_labels)``.
     category : str
-        Category key from ``category_dict`` to plot.
+        Category key from ``category_dict`` to plot (e.g. ``'GENIE'``,
+        ``'DetVar'``). Ignored for filtering when ``subcategory`` is set, but
+        still used to look up style in ``category_dict`` unless ``subcategory``
+        is also a key there.
     category_dict : dict
-        Mapping of category name → style dict (``color``, ``label``, ``line``).
+        Mapping of category (or subcategory) name → style dict
+        (``color``, ``label``, ``line``).
     region_label : str, optional
-        Text stamped in the corner ojf each subplot.
+        Text stamped in the corner of each subplot.
     figsize : tuple, optional
         Figure size. Defaults to ``(5 * n_vars, 4)``.
     xsec : bool, default False
         If True, plot uncertainties on the cross section (``xsec_syst_df``)
         instead of the event rate (``rate_syst_df``).
+    subcategory : str, optional
+        When set, filter rows by ``syst_df.subcategory == subcategory`` instead
+        of ``syst_df.category == category``. Use this to drill into DetVar
+        subcategories (``'PMT'``, ``'WireMod'``, ``'SCE'``, ``'calorimetry'``).
+        The style is looked up as ``category_dict[subcategory]`` if that key
+        exists, otherwise falls back to ``category_dict[category]``.
 
     Returns
     -------
@@ -1058,8 +1099,9 @@ def plot_syst_breakdown(
     if figsize is None:
         figsize = (5 * n, 4)
 
-    this_color = category_dict[category]['color']
-    this_label = category_dict[category]['label']
+    _style_key = subcategory if (subcategory is not None and subcategory in category_dict) else category
+    this_color = category_dict[_style_key]['color']
+    this_label = category_dict[_style_key]['label']
 
     fig, axes = plt.subplots(1, n, figsize=figsize)
     if n == 1:
@@ -1076,7 +1118,10 @@ def plot_syst_breakdown(
         else:
             syst_df = syst_output.rate_syst_df
 
-        this_df = syst_df[syst_df.category == category].sort_values('unc_norm', ascending=False)
+        if subcategory is not None:
+            this_df = syst_df[syst_df.subcategory == subcategory].sort_values('unc_norm', ascending=False)
+        else:
+            this_df = syst_df[syst_df.category == category].sort_values('unc_norm', ascending=False)
 
         for _, row in this_df.iterrows():
             ax.stairs(

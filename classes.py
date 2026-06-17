@@ -209,6 +209,7 @@ class PlottingConfig:
     legend_kwargs: dict | None = None
     ratio_min: float = 0.0
     ratio_max: float = 2.0
+    ylim_scale: float = 1.5
     data_first: bool = True
     internal: bool = True
     categories: dict | None = None
