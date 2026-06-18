@@ -332,7 +332,7 @@ def get_intime_cov(selected_df, var, bins,
     mcint_df = apply_event_mask(ensure_lexsorted(mcint_df, axis=1))
 
     selected_fpw = flux_pot_weights(selected_df, mcbnb_pot, integrated_flux)
-    mcint_fpw    = np.full(len(mcint_df), scale / (integrated_flux * (mcbnb_pot / 1e6)))
+    mcint_fpw    = np.full(len(mcint_df), scale / (integrated_flux * mcbnb_pot))
 
     rate_hist_cv = get_hist1d(data=selected_df[var], bins=bins, weights=selected_fpw)
 
@@ -522,7 +522,7 @@ def get_total_cov(reco_df, reco_var, bins, mcbnb_pot,
             get_hist1d(data=sorted_df[reco_var], weights=sorted_df.weights_mc, bins=bins)
             * (projected_pot / mcbnb_pot)
         )
-        flux_scale = integrated_flux * (projected_pot / 1e6)
+        flux_scale = integrated_flux * projected_pot
         data_unc = np.divide(data_err, flux_scale * rate_hist_cv,
                              out=np.zeros_like(data_err, dtype=float), where=rate_hist_cv > 0)
         _data_unc_norm = float(np.sqrt(np.sum(data_err**2))) / (flux_scale * float(np.sum(rate_hist_cv))) if np.sum(rate_hist_cv) > 0 else 0.0
@@ -655,7 +655,7 @@ def get_data_mc_ratio(
 
     if isinstance(systs, SystematicsInput) or type(systs).__name__ == 'SystematicsInput':
         out = get_total_cov(reco_df=mc_df, reco_var=_var, bins=_bins, **systs.to_kwargs())
-        hist_scale = integrated_flux * (systs.mcbnb_pot / 1e6) * scale
+        hist_scale = integrated_flux * systs.mcbnb_pot * scale
         mc_total    = mc_total_raw * hist_scale
         rate_cov    = np.asarray(out.rate_cov) * hist_scale**2
         total_var   = float(rate_cov.sum())

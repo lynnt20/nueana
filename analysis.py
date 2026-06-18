@@ -79,8 +79,12 @@ __all__ = [
 RHO = 1.3836        # g/cm3, liquid Ar density
 N_A = 6.02214076e23 # Avogadro's number
 M_AR = 40           # g, molar mass of argon
-# x cm (drift) * z cm (width) * y cm (height), excluding 90 cm of y-dimension at high z
-V_SBND = (190)*2 * ((250 - 10)*(190*2) + (450-250)*(100 + 190))
+# FV_split_truncY_eastonly: 5 < |x| < 190, |y| < 190, 10 < z < 250 (both TPCs)
+# + East (x<0): -190 < y < 100, 250 < z < 450
+# + West (x>0):  |y| < 190,     250 < z < 450
+V_SBND = (2 * 185 * 380 * 240   # both TPCs, low z
+         + 185 * 290 * 200       # East TPC, high z, truncated y
+         + 185 * 380 * 200)      # West TPC, high z, full y
 NTARGETS = RHO * V_SBND * N_A / M_AR
 
 
@@ -182,12 +186,12 @@ category_dict_control = {
 # Flux and normalisation constants
 # ---------------------------------------------------------------------------
 
-# flux file, units: /m^2/10^6 POT, 50 MeV bins
-with uproot.open(config.FLUX_FILE) as f:
-    nue_flux = f["flux_sbnd_nue"].to_numpy()
-    flux_vals = nue_flux[0]
-integrated_flux = flux_vals.sum() / 1e4               # convert to cm^-2
-integrated_flux *= (180*180) / (200*200)               # rescale front face to AV front face
+# flux file, units: cm^-2 POT^-1 per 50 MeV bin (volume-averaged, FV_split_truncY_eastonly)
+with uproot.open(config.FLUX_FILE_NEW) as f:
+    nue_flux  = f["flux_sbnd_nue"].to_numpy()
+    anue_flux = f["flux_sbnd_anue"].to_numpy()
+    flux_vals = nue_flux[0] + anue_flux[0]             # nue + nuebar
+integrated_flux = flux_vals.sum()                      # cm^-2 POT^-1
 
 POT_NORM_UNC  = 0.02  # fractional uncertainty on beam exposure (POT counting)
 NTARGETS_UNC  = 0.01  # fractional uncertainty on number of Ar targets

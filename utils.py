@@ -145,18 +145,18 @@ def flux_pot_weights(df: pd.DataFrame, mcbnb_pot: float, integrated_flux: float)
 
     Equivalent to the per-row formula::
 
-        flux_pot_norm = weights_mc / (integrated_flux * mcbnb_pot / 1e6)
+        flux_pot_norm = weights_mc / (integrated_flux * mcbnb_pot)
 
     Parameters
     ----------
     df : pandas.DataFrame
         DataFrame carrying a ``weights_mc`` column.
     mcbnb_pot : float
-        Reference BNB POT for the sample.
+        Reference BNB POT for the sample (absolute POT, not millions).
     integrated_flux : float
-        Integrated nue flux in cm⁻² (from :data:`nueana.analysis.integrated_flux`).
+        Integrated nue+nuebar flux in cm⁻² POT⁻¹ (from :data:`nueana.analysis.integrated_flux`).
     """
-    return df.weights_mc.values / (integrated_flux * (mcbnb_pot / 1e6))
+    return df.weights_mc.values / (integrated_flux * mcbnb_pot)
 
 
 def get_hist1d(weights=None, data=None, bins=None, overflow=True, **kwargs):

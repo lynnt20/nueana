@@ -53,7 +53,7 @@ class UnfoldInput:
     once per FDT iteration.
 
     All internal arrays are in flux-averaged event-rate units
-    (``weights_mc / (integrated_flux * mcbnb_pot / 1e6)``), consistent with
+    (``weights_mc / (integrated_flux * mcbnb_pot)``), consistent with
     :class:`~nueana.classes.SystematicsOutput` and
     :func:`make_fake_data_hists`.  Cross-section unit conversion is deferred
     to ``unfold()`` via ``xsec_scale``, so the same object can be reused
@@ -186,7 +186,7 @@ class UnfoldInput:
                 "syst_output.mcbnb_pot is None — cannot flux-average cv_signal. "
                 "Pass mcbnb_pot to get_total_cov when building syst_output."
             )
-        flux_norm = integrated_flux * (syst_output.mcbnb_pot / 1e6)
+        flux_norm = integrated_flux * syst_output.mcbnb_pot
         true_df = ensure_lexsorted(true_df, axis=1)
 
         response = get_response_matrix(reco_df, true_df, var)
@@ -278,7 +278,7 @@ def make_fake_data_hists(
     """Build background-subtracted fake-data and modified signal histograms for an FDT.
 
     All returned histograms are in flux-averaged event-rate units
-    (``weights_mc / (integrated_flux * mcbnb_pot / 1e6)``), consistent with the
+    (``weights_mc / (integrated_flux * mcbnb_pot)``), consistent with the
     covariance matrices and CV histograms in :class:`~nueana.classes.SystematicsOutput`.
 
     Without CCBC inputs the CV background (signal != 0) is subtracted.  When
@@ -339,7 +339,7 @@ def make_fake_data_hists(
         CCBC-constrained prediction; use as the "ground-truth background" overlay
         in :func:`~nueana.ccbc.plot_ccbc_fd_comparison`.
     """
-    flux_norm = integrated_flux * (mcbnb_pot / 1e6)
+    flux_norm = integrated_flux * mcbnb_pot
 
     reco_df = ensure_lexsorted(reco_df, axis=1)
     true_df = ensure_lexsorted(true_df, axis=1)

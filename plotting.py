@@ -389,7 +389,7 @@ def plot_var(indf: pd.DataFrame,
         # Case 1: call get_total_cov on-the-fly with the bundled parameters.
         from .funcs import get_total_cov
         _output = get_total_cov(reco_df=indf, reco_var=var, bins=bins, **systs.to_kwargs())
-        _hist_scale = integrated_flux * (systs.mcbnb_pot/1e6)
+        _hist_scale = integrated_flux * systs.mcbnb_pot
         total_cov, systs_arr, syst_dict, calc_separate_mcstat = _apply_syst_output(_output, _hist_scale)
         _syst_source = 'full'
 
@@ -397,7 +397,7 @@ def plot_var(indf: pd.DataFrame,
         # Case 2: caller already ran get_total_cov and passes the result directly.
         if systs.mcbnb_pot is None:
             raise ValueError("SystematicsOutput.mcbnb_pot is not set; use get_total_cov to produce it")
-        _hist_scale = integrated_flux * (systs.mcbnb_pot/1e6)
+        _hist_scale = integrated_flux * systs.mcbnb_pot
         total_cov, systs_arr, syst_dict, calc_separate_mcstat = _apply_syst_output(systs, _hist_scale)
         _syst_source = 'full'
 
@@ -1001,7 +1001,7 @@ def plot_syst_category_breakdown(
 
         if show_cv:
             plt.subplots_adjust(wspace=0.5)
-            flux_scale = integrated_flux * (projected_pot / 1e6)
+            flux_scale = integrated_flux * projected_pot
             cv_counts = cv_hist * flux_scale
             ax_cv = ax.twinx()
             ax_cv.stairs(cv_counts, bins, fill=True, alpha=0.25, color='steelblue', lw=0)

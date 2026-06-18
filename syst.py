@@ -577,7 +577,7 @@ def get_detvar_systs(detvar_dict, var, bins,
         this_dict = detvar_dict[key]
         this_dv   = this_dict['dv_df']
         this_cv   = this_dict['cv_df']
-        this_norm = integrated_flux * (this_dict['pot'] / 1e6)
+        this_norm = integrated_flux * this_dict['pot']
 
         def _ensure_signal(df):
             """Add the signal column via define_signal if it is missing."""
