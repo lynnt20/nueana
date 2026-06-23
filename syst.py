@@ -623,7 +623,7 @@ _DETVAR_SUBCATEGORIES: list[tuple[str, list[str]]] = [
     ("WireMod",     ["wiremod"]),
     ("SCE",         ["sce"]),
     ("PMT",         ["pmt"]),
-    ("calorimetry", ["ccal", "phi", "alpha", "beta90", "beta_90", "betap90","Ecorr",'yz']),
+    ("calorimetry", ["ccal", "phi", "alpha", "beta90", "beta_90", "betap90","Ecorr",'yz','calo']),
 ]
 
 _CATEGORY_KEYWORDS = ["GENIE", "Flux", "MCstat", "DetVar", "Geant4"]
@@ -705,7 +705,7 @@ def _classify_detvar_subcategory(detvar_key: str) -> str:
     key    = detvar_key.lower()
     tokens = key.replace("-", "_").split("_")
     for subcategory, keywords in _DETVAR_SUBCATEGORIES:
-        if any(kw in key for kw in keywords):
+        if any(kw.lower() in key for kw in keywords):
             return subcategory
     if "r" in tokens:
         return "calorimetry"
