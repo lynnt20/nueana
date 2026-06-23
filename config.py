@@ -25,7 +25,7 @@ FLUX_FILE = "/exp/sbnd/data/users/lynnt/xsection/flux/sbnd_original_flux.root"
 
 # Volume-averaged BNB gsimple flux (nue+nuebar, FV_split_truncY_eastonly)
 # Units: cm^-2 POT^-1 per 50 MeV bin
-FLUX_FILE_NEW = "/exp/sbnd/app/users/lynnt/cafpyana/analysis_village/flux/sbnd_flux_new.root"
+FLUX_FILE_NEW = "/exp/sbnd/app/users/lynnt/cafpyana/analysis_village/flux/sbnd_flux_oct23.root"
 
 # In-time cosmic sample file path
 INTIME_FILE = "/exp/sbnd/data/users/lynnt/xsection/samples/MCP2025B_v10_06_00_09/dfs_nu26/mc_intime.df"
