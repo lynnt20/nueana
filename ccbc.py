@@ -300,9 +300,14 @@ def get_ccbc_cov(
         nc_h  = nc_output.rate_syst_dict[key]["hists"]
         Ps_h  = Ps_output.xsec_syst_dict[key]["hists"]
 
-        Bs_cv = Bs_output.rate_hist_cv
-        nc_cv = nc_output.rate_hist_cv
-        Ps_cv = Ps_output.rate_hist_cv
+        # For keys that store their own CV (DetVar alternative-simulation keys),
+        # use it as the baseline so the covariance captures only the detector
+        # variation effect and not any offset between the DetVar CV run and the
+        # main analysis MC.  GENIE/Flux/MCstat entries have no "hist_cv" and
+        # fall back to rate_hist_cv, which is correct for reweight-based systematics.
+        Bs_cv = np.asarray(Bs_output.rate_syst_dict[key].get("hist_cv", Bs_output.rate_hist_cv))
+        nc_cv = np.asarray(nc_output.rate_syst_dict[key].get("hist_cv", nc_output.rate_hist_cv))
+        Ps_cv = np.asarray(Ps_output.xsec_syst_dict[key].get("hist_cv", Ps_output.rate_hist_cv))
 
         cov_Bs_nc += nonsymmetric_cov(Bs_h, Bs_cv, nc_h, nc_cv)
         cov_Ps_nc += nonsymmetric_cov(Ps_h, Ps_cv, nc_h, nc_cv)
@@ -311,12 +316,12 @@ def get_ccbc_cov(
         cov_Bs_Bs += nonsymmetric_cov(Bs_h, Bs_cv, Bs_h, Bs_cv)
         cov_Ps_Ps += nonsymmetric_cov(Ps_h, Ps_cv, Ps_h, Ps_cv)
 
-        # Scalar (1-bin) accumulators matching get_syst_df convention:
-        # h.sum(axis=0) - cv.sum() gives a per-universe scalar deviation;
-        # dot(dev, dev) / nuniv is the normalization variance.
-        # Ps uses xsec_syst_dict (Ps_h already set above) with rate_hist_cv as CV.
-        # Bs and nc use rate_syst_dict (Bs_h, nc_h already set above) with rate_hist_cv.
-        # rate_hist_cv is used throughout (not xsec_hist_cv, which is background-subtracted).
+        # Scalar (1-bin) accumulators for variable-independent normalization percentages.
+        # Ps uses xsec_syst_dict universe histograms (response-matrix-weighted) so that
+        # norm_cov_ns_ns / norm_cov_ms_ms reflect the cross-section-level uncertainty,
+        # not just the raw rate uncertainty.  The CV denominator is always rate_hist_cv
+        # (not xsec_hist_cv, which is background-subtracted) so the fraction is relative
+        # to the total observed rate.  Bs and nc use rate_syst_dict histograms throughout.
         _nuniv = np.asarray(Ps_h).shape[1]
         Ps_d = np.asarray(Ps_h).sum(axis=0) - float(np.asarray(Ps_cv).sum())
         Bs_d = np.asarray(Bs_h).sum(axis=0) - float(np.asarray(Bs_cv).sum())
@@ -366,7 +371,6 @@ def get_ccbc_cov(
                 stacklevel=2,
             )
         else:
-            ns_cv = ns_output.rate_hist_cv
             cov_ns_ns_direct = zeros()
             for key in nc_output.rate_syst_dict:
                 if not key_in_allowed(key, allowed_keys):
@@ -376,7 +380,8 @@ def get_ccbc_cov(
                 if key not in ns_output.xsec_syst_dict:
                     continue
                 ns_h = ns_output.xsec_syst_dict[key]["hists"]
-                cov_ns_ns_direct += nonsymmetric_cov(ns_h, ns_cv, ns_h, ns_cv)
+                ns_cv_key = np.asarray(ns_output.xsec_syst_dict[key].get("hist_cv", ns_output.rate_hist_cv))
+                cov_ns_ns_direct += nonsymmetric_cov(ns_h, ns_cv_key, ns_h, ns_cv_key)
 
             # Compare against the syst-only part of cov_ns_ns; data_stat_ns is
             # added externally and is not built from universe histograms.
@@ -591,8 +596,8 @@ def plot_ccbc_constraint(
 
         label_pre_Bs  = f"Pre-constraint ({np.sqrt(np.sum(pre_cov_Bs))  / np.sum(Bs_hist) * 100:.1f}%)"
         label_post_Bs = f"Post-constraint ({np.sqrt(np.sum(post_cov_Bs)) / np.sum(Bs_hist) * 100:.1f}%)"
-        label_pre_ns  = f"Pre-constraint ({np.sqrt(cov['norm_cov_ns_ns'])  / np.sum(ns_hist) * 100:.1f}%)"
-        label_post_ns = f"Post-constraint ({np.sqrt(cov['norm_cov_ms_ms']) / np.sum(ns_hist) * 100:.1f}%)"
+        label_pre_ns  = f"Pre-constraint ({np.sqrt(np.sum(pre_cov_ns))  / np.sum(ns_hist) * 100:.1f}%)"
+        label_post_ns = f"Post-constraint ({np.sqrt(np.sum(post_cov_ns)) / np.sum(ns_hist) * 100:.1f}%)"
 
         # Row 1: B_S main
         axes_Bs_main[i].stairs(Bs_hist, bins, color="black", label=r"$B_S^{CV}$")
@@ -769,10 +774,10 @@ def plot_ccbc_summary(
     stat_ratio_Bs = stat_err_Bs / Bs_hist
     stat_ratio_ns = stat_err_ns / ns_hist
 
-    label_pre_Bs  = f"Pre-constraint ({np.sqrt(ccbc_cov['norm_cov_Bs_Bs'] * scale_sq)  / np.sum(Bs_hist) * 100:.1f}%)"
-    label_post_Bs = f"Post-constraint ({np.sqrt(ccbc_cov['norm_cov_Bs_Bs_constr'] * scale_sq) / np.sum(Bs_hist) * 100:.1f}%)"
-    label_pre_ns  = f"Pre-constraint  ({np.sqrt(ccbc_cov['norm_cov_ns_ns'] * scale_sq)  / np.sum(ns_hist) * 100:.1f}%)"
-    label_post_ns = f"Post-constraint ({np.sqrt(ccbc_cov['norm_cov_ms_ms'] * scale_sq) / np.sum(ns_hist) * 100:.1f}%)"
+    label_pre_Bs  = f"Pre-constraint ({np.sqrt(np.sum(pre_cov_Bs))  / np.sum(Bs_hist) * 100:.1f}%)"
+    label_post_Bs = f"Post-constraint ({np.sqrt(np.sum(post_cov_Bs)) / np.sum(Bs_hist) * 100:.1f}%)"
+    label_pre_ns  = f"Pre-constraint  ({np.sqrt(np.sum(pre_cov_ns))  / np.sum(ns_hist) * 100:.1f}%)"
+    label_post_ns = f"Post-constraint ({np.sqrt(np.sum(post_cov_ns)) / np.sum(ns_hist) * 100:.1f}%)"
 
     if axes is None:
         fig = plt.figure(figsize=(10, 5))
@@ -1070,8 +1075,8 @@ def plot_ccbc_blocks(
 
         Bs_h  = Bs_output.rate_syst_dict[key]["hists"]
         nc_h  = nc_output.rate_syst_dict[key]["hists"]
-        Bs_cv = Bs_output.rate_hist_cv
-        nc_cv = nc_output.rate_hist_cv
+        Bs_cv = np.asarray(Bs_output.rate_syst_dict[key].get("hist_cv", Bs_output.rate_hist_cv))
+        nc_cv = np.asarray(nc_output.rate_syst_dict[key].get("hist_cv", nc_output.rate_hist_cv))
 
         cov_Bs_nc += nonsymmetric_cov(Bs_h, Bs_cv, nc_h, nc_cv)
         cov_Bs_Bs += nonsymmetric_cov(Bs_h, Bs_cv, Bs_h, Bs_cv)
@@ -1141,10 +1146,8 @@ def plot_ccbc_key_correlations(
     """
     import pandas as pd
 
-    Bs_cv = np.asarray(Bs_output.rate_hist_cv)
-    nc_cv = np.asarray(nc_output.rate_hist_cv)
-    N_Bs  = float(np.sum(Bs_cv))
-    N_nc  = float(np.sum(nc_cv))
+    N_Bs = float(np.sum(Bs_output.rate_hist_cv))
+    N_nc = float(np.sum(nc_output.rate_hist_cv))
 
     records = []
     for key in nc_output.rate_syst_dict:
@@ -1153,8 +1156,10 @@ def plot_ccbc_key_correlations(
         if key not in Bs_output.rate_syst_dict:
             continue
 
-        Bs_h = np.asarray(Bs_output.rate_syst_dict[key]["hists"])  # (nbins, nuniv)
-        nc_h = np.asarray(nc_output.rate_syst_dict[key]["hists"])
+        Bs_h  = np.asarray(Bs_output.rate_syst_dict[key]["hists"])  # (nbins, nuniv)
+        nc_h  = np.asarray(nc_output.rate_syst_dict[key]["hists"])
+        Bs_cv = np.asarray(Bs_output.rate_syst_dict[key].get("hist_cv", Bs_output.rate_hist_cv))
+        nc_cv = np.asarray(nc_output.rate_syst_dict[key].get("hist_cv", nc_output.rate_hist_cv))
 
         # scalar fluctuation per universe: sum bins, subtract CV total
         delta_Bs = Bs_h.sum(axis=0) - Bs_cv.sum()   # shape (nuniv,)

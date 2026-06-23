@@ -108,7 +108,7 @@ class UnfoldInput:
             Scale factor applied to convert from flux-averaged event-rate units
             to cross-section units. Applied as ``xsec_scale`` to Signal and
             Measure and ``xsec_scale²`` to the covariance. Defaults to
-            ``1 / NTARGETS`` (cross-section units). Pass ``1.0`` to keep
+            ``1 / NTARGETS`` (cross-section per nucleon). Pass ``1.0`` to keep
             flux-averaged event-rate units.
         total_cov : np.ndarray or None, optional
             Pre-built covariance matrix in flux-averaged squared units that
