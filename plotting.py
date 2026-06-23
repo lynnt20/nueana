@@ -40,7 +40,8 @@ from .analysis import (signal_dict, signal_categories, signal_categories_externa
                        generic_dict, generic_categories,
                        pdg_categories,
                        mode_dict, mode_categories,
-                       integrated_flux)
+                       integrated_flux,
+                       detvar_subcat_dict)
 from .utils import ensure_lexsorted
 from .syst import get_syst
 from .utils import get_hist1d
@@ -1060,6 +1061,7 @@ def plot_syst_breakdown(
     figsize: tuple[int, int] | None = None,
     xsec: bool = False,
     subcategory: str | None = None,
+    show_subcategories: bool = False,
 ) -> tuple[plt.Figure, np.ndarray]:
     """Plot the per-source systematics breakdown for one category.
 
@@ -1090,6 +1092,12 @@ def plot_syst_breakdown(
         subcategories (``'PMT'``, ``'WireMod'``, ``'SCE'``, ``'calorimetry'``).
         The style is looked up as ``category_dict[subcategory]`` if that key
         exists, otherwise falls back to ``category_dict[category]``.
+    show_subcategories : bool, default False
+        If True, overlay one combined line per subcategory on top of the
+        individual contributions. Each subcategory line is the quadrature sum
+        of all rows in that subcategory, styled via ``category_dict``. Useful
+        for DetVar to see PMT, WireMod, SCE, etc. at a glance alongside the
+        individual sources.
 
     Returns
     -------
@@ -1123,14 +1131,36 @@ def plot_syst_breakdown(
         else:
             this_df = syst_df[syst_df.category == category].sort_values('unc_norm', ascending=False)
 
-        for _, row in this_df.iterrows():
-            ax.stairs(
-                row.unc_diag * 100,
-                bins,
-                lw=1.5,
-                label=row.key + f" ({row['unc_norm']:.1%})" if row.top5 else "",
-                alpha=0.5,
+        if show_subcategories:
+            subcat_order = (
+                this_df.groupby('subcategory')['unc_norm']
+                .apply(lambda s: float(np.sqrt(np.sum(s**2))))
+                .sort_values(ascending=False)
+                .index
             )
+            for subcat in subcat_order:
+                group = this_df[this_df['subcategory'] == subcat]
+                style    = category_dict.get(subcat, category_dict.get(category, {}))
+                unc_sum  = float(np.sqrt(np.sum(group['unc_norm'] ** 2)))
+                combined = _combine_syst_uncertainties(group)
+                if combined.size:
+                    ax.stairs(
+                        combined * 100,
+                        bins,
+                        lw=2.0,
+                        linestyle=style.get('line', '--'),
+                        color=style.get('color', None),
+                        label=f"{style.get('label', subcat)} ({unc_sum:.1%})",
+                    )
+        else:
+            for _, row in this_df.iterrows():
+                ax.stairs(
+                    row.unc_diag * 100,
+                    bins,
+                    lw=1.5,
+                    label=row.key + f" ({row['unc_norm']:.1%})" if row.top5 else "",
+                    alpha=0.5,
+                )
 
         tot = _combine_syst_uncertainties(this_df)
         tot_sum = float(np.sqrt(np.sum(this_df['unc_norm'] ** 2)))

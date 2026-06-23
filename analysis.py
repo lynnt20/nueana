@@ -57,7 +57,7 @@ __all__ = [
     'generic_categories', 'generic_dict',
     'pdg_categories', 'pdg_dict',
     'mode_categories', 'mode_dict',
-    'category_dict_signal', 'category_dict_control',
+    'category_dict_signal', 'category_dict_control', 'detvar_subcat_dict',
     # flux and normalisation
     'nue_flux', 'flux_vals', 'integrated_flux',
     'POT_NORM_UNC', 'NTARGETS_UNC',
@@ -85,7 +85,7 @@ M_AR = 40           # g, molar mass of argon
 V_SBND = (2 * 185 * 380 * 240   # both TPCs, low z
          + 185 * 290 * 200       # East TPC, high z, truncated y
          + 185 * 380 * 200)      # West TPC, high z, full y
-NTARGETS = RHO * V_SBND * N_A / M_AR
+NTARGETS = RHO * V_SBND * N_A                   # number of nucleons (nucleon molar mass ≈ 1 g/mol)
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +179,17 @@ category_dict_control = {
     'Cosmic':       {'color': 'saddlebrown',     'label': 'Cosmic', 'line': '-'},
     'MCstat':       {'color': 'slategray',       'label': 'MC statistics', 'line': '-'},
     'Datastat':     {'color': 'gray',            'label': 'Data statistics\n[proj. 1e20 POT]', 'line': '--'},
+}
+
+# Subcategory breakdown dict for DetVar — use with plot_syst_breakdown(..., show_subcategories=True).
+# Keys match the subcategory labels assigned by syst._classify_detvar_subcategory.
+# The 'DetVar' entry styles the combined total line; subcategory entries use dashed lines.
+detvar_subcat_dict = {
+    'PMT':         {'color': 'goldenrod',     'label': 'PMT',         'line': '--'},
+    'SCE':         {'color': 'tomato',        'label': 'SCE',         'line': '--'},
+    'WireMod':     {'color': 'cornflowerblue','label': 'WireMod',     'line': '--'},
+    'calorimetry': {'color': 'darkred',       'label': 'calorimetry', 'line': '--'},
+    'DetVar':      {'color': 'orange',        'label': 'DetVar',      'line': '-'},
 }
 
 
