@@ -46,40 +46,43 @@ def _default_chisq_label(label: str, chisq: float, ndof: int) -> str:
 class UnfoldInput:
     """Pre-built inputs to a WienerSVD unfolding call.
 
-    Stores the fixed components (response matrix, CV signal prediction, and
-    per-key systematic covariance matrices) that are expensive to compute and
-    do not change between fake-data test iterations. The measurement and
-    covariance key selection are deferred to ``unfold()``, which is called
-    once per FDT iteration.
+    Stores the fixed components (response matrix, CV signal prediction,
+    per-key systematic covariance matrices, and the sample's nominal POT)
+    that are expensive to compute and do not change between fake-data test
+    iterations. The measurement and covariance key selection are deferred
+    to ``unfold()``, which is called once per FDT iteration.
 
-    All internal arrays are in flux-averaged event-rate units
-    (``weights_mc / (integrated_flux * mcbnb_pot)``), consistent with
+    All internal arrays are in absolute event-count units at ``mcbnb_pot``
+    (``weights_mc`` summed, no flux division), consistent with
     :class:`~nueana.classes.SystematicsOutput` and
     :func:`make_fake_data_hists`.  Cross-section unit conversion is deferred
-    to ``unfold()`` via ``xsec_scale``, so the same object can be reused
-    across FDT iterations and the final data unfolding.
+    to ``unfold()`` via ``xsec_scale``, whose default resolves to true
+    cm²·nucleon⁻¹ using the stored ``mcbnb_pot``.
 
     Parameters
     ----------
     response : np.ndarray, shape (n_reco, n_true)
         Response matrix from get_response_matrix.
     cv_signal : np.ndarray, shape (n_true,)
-        Central-value signal prediction in flux-averaged units.
+        Central-value signal prediction in absolute event-count units at mcbnb_pot.
     syst_covs : dict of str -> np.ndarray
-        Per-key covariance matrices in flux-averaged squared units, from
+        Per-key covariance matrices in event-count² units at mcbnb_pot, from
         syst_output.xsec_syst_dict.
+    mcbnb_pot : float
+        Nominal POT of the MC sample; used to compute the default xsec_scale
+        in :meth:`unfold` so the unfolded result is in cm²·nucleon⁻¹.
     """
     response:  np.ndarray
     cv_signal: np.ndarray
     syst_covs: dict
-
+    mcbnb_pot: float
     def unfold(
         self,
         wienersvd_fn: Callable,
         measure: np.ndarray,
         allowed_keys: tuple[str, ...] | None = None,
         extra_cov: np.ndarray | None = None,
-        xsec_scale: float = 1.0 / NTARGETS,
+        xsec_scale: float | None = None,
         total_cov: np.ndarray | None = None,
         c_type: int = 2,
         norm_type: float = 0.5,
@@ -91,8 +94,8 @@ class UnfoldInput:
         wienersvd_fn : callable
             The WienerSVD function imported from cafpyana in the notebook.
         measure : np.ndarray, shape (n_reco,)
-            Background-subtracted measurement in flux-averaged units (output
-            of :func:`make_fake_data_hists`).
+            Background-subtracted measurement in absolute event-count units at
+            mcbnb_pot (output of :func:`make_fake_data_hists`).
         allowed_keys : tuple of str or None, optional
             Categories to include, matched via the same classification logic as
             syst.py (e.g. ``('GENIE', 'MCstat')``). Each key in syst_covs is
@@ -101,18 +104,21 @@ class UnfoldInput:
             GENIE aliases (SBNNuSyst, SuSAv2) are handled correctly. None
             (default) includes all keys. Ignored when total_cov is provided.
         extra_cov : np.ndarray or None, optional
-            Additional covariance matrix in flux-averaged squared units, added
-            after summing syst_covs and applying xsec_scale². Use for
-            fake-data or data statistical uncertainty.
+            Additional covariance matrix in event-count² units, added after
+            summing syst_covs and applying xsec_scale². Use for fake-data or
+            data statistical uncertainty.
         xsec_scale : float, optional
-            Scale factor applied to convert from flux-averaged event-rate units
-            to cross-section units. Applied as ``xsec_scale`` to Signal and
-            Measure and ``xsec_scale²`` to the covariance. Defaults to
-            ``1 / NTARGETS`` (cross-section per nucleon). Pass ``1.0`` to keep
-            flux-averaged event-rate units.
+            Scale factor applied to convert from absolute event-count units to
+            cross-section units. Applied as ``xsec_scale`` to Signal and
+            Measure and ``xsec_scale²`` to the covariance.  Defaults to
+            ``1 / (integrated_flux * self.mcbnb_pot * NTARGETS)`` — true
+            differential cross-section units (cm²·nucleon⁻¹).  Pass ``1.0``
+            to keep absolute event-count units.  The resolved value is
+            stamped onto the returned dict as ``result['xsec_scale']`` so
+            :func:`plot_unfolded_result` can inherit it automatically.
         total_cov : np.ndarray or None, optional
-            Pre-built covariance matrix in flux-averaged squared units that
-            replaces the syst_covs summation entirely. Use to pass
+            Pre-built covariance matrix in event-count² units that replaces
+            the syst_covs summation entirely. Use to pass
             ``ccbc_dict['cov_ms_ms']`` directly — its allowed-key selection
             was already applied inside ``get_ccbc_cov``. allowed_keys is
             ignored.
@@ -126,8 +132,11 @@ class UnfoldInput:
         -------
         dict
             WienerSVD output dict with keys 'unfold', 'AddSmear', 'WF',
-            'UnfoldCov', 'CovRotation'.
+            'UnfoldCov', 'CovRotation', plus the resolved 'xsec_scale' used
+            for unit conversion (consumed by :func:`plot_unfolded_result`).
         """
+        if xsec_scale is None:
+            xsec_scale = 1.0 / (integrated_flux * self.mcbnb_pot * NTARGETS)
         n_bins = self.cv_signal.shape[0]
         if total_cov is not None:
             cov = total_cov
@@ -139,7 +148,7 @@ class UnfoldInput:
         if extra_cov is not None:
             cov = cov + extra_cov
         cov = cov * xsec_scale ** 2
-        return wienersvd_fn(
+        result = wienersvd_fn(
             Response=self.response,
             Signal=self.cv_signal * xsec_scale,
             Measure=measure * xsec_scale,
@@ -147,6 +156,8 @@ class UnfoldInput:
             C_type=c_type,
             Norm_type=norm_type,
         )
+        result['xsec_scale'] = xsec_scale
+        return result
 
     @classmethod
     def build(
@@ -173,20 +184,14 @@ class UnfoldInput:
         true_df : pd.DataFrame
             Truth-level signal-only sample with weights_mc column.
         syst_output : SystematicsOutput
-            Output of get_total_cov for this variable. Provides mcbnb_pot for
-            flux-averaging cv_signal. All entries in xsec_syst_dict are stored
-            in flux-averaged squared units; key filtering happens in unfold().
+            Output of get_total_cov for this variable. Provides mcbnb_pot used
+            to build cv_signal. All entries in xsec_syst_dict are stored
+            in event-count² units; key filtering happens in unfold().
 
         Returns
         -------
         UnfoldInput
         """
-        if syst_output.mcbnb_pot is None:
-            raise ValueError(
-                "syst_output.mcbnb_pot is None — cannot flux-average cv_signal. "
-                "Pass mcbnb_pot to get_total_cov when building syst_output."
-            )
-        flux_norm = integrated_flux * syst_output.mcbnb_pot
         true_df = ensure_lexsorted(true_df, axis=1)
 
         response = get_response_matrix(reco_df, true_df, var)
@@ -194,7 +199,7 @@ class UnfoldInput:
         cv_signal = get_hist1d(
             data=true_df[var.var_nu_col],
             bins=var.bins,
-            weights=true_df.weights_mc / flux_norm,
+            weights=true_df.weights_mc,
         )
 
         syst_covs = {
@@ -206,6 +211,7 @@ class UnfoldInput:
             response=response,
             cv_signal=cv_signal,
             syst_covs=syst_covs,
+            mcbnb_pot=syst_output.mcbnb_pot,
         )
 
 def get_response_matrix(
@@ -277,8 +283,8 @@ def make_fake_data_hists(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray | None, np.ndarray]:
     """Build background-subtracted fake-data and modified signal histograms for an FDT.
 
-    All returned histograms are in flux-averaged event-rate units
-    (``weights_mc / (integrated_flux * mcbnb_pot)``), consistent with the
+    All returned histograms are in absolute event-count units at the sample's
+    nominal POT (``weights_mc`` summed, no flux division), consistent with the
     covariance matrices and CV histograms in :class:`~nueana.classes.SystematicsOutput`.
 
     Without CCBC inputs the CV background (signal != 0) is subtracted.  When
@@ -322,32 +328,31 @@ def make_fake_data_hists(
     Returns
     -------
     fd_meas : np.ndarray
-        Background-subtracted fake measurement in flux-averaged units.
+        Background-subtracted fake measurement in absolute event-count units at mcbnb_pot.
     fd_true : np.ndarray
-        Modified truth-level signal histogram in flux-averaged units.
+        Modified truth-level signal histogram in absolute event-count units at mcbnb_pot.
     fd_ns : np.ndarray
         Total (signal + background) fake-data signal-region histogram in
-        flux-averaged units, before background subtraction.  Plays the role
-        of observed data (``D_S``) in :func:`~nueana.ccbc.plot_ccbc_fd_comparison`.
+        absolute event-count units at mcbnb_pot, before background subtraction.
+        Plays the role of observed data (``D_S``) in
+        :func:`~nueana.ccbc.plot_ccbc_fd_comparison`.
     fd_nc : np.ndarray or None
-        Control-region fake-data histogram in flux-averaged units, or
-        ``None`` when ``side_df`` is not provided.
+        Control-region fake-data histogram in absolute event-count units at mcbnb_pot,
+        or ``None`` when ``side_df`` is not provided.
     fd_Bs : np.ndarray
-        True reweighted background histogram in flux-averaged units — the
-        background-event (``signal != 0``) contribution under the FDT weights.
+        True reweighted background histogram in absolute event-count units at mcbnb_pot
+        — the background-event (``signal != 0``) contribution under the FDT weights.
         Distinct from the CV background (no reweighting) and from the
         CCBC-constrained prediction; use as the "ground-truth background" overlay
         in :func:`~nueana.ccbc.plot_ccbc_fd_comparison`.
     """
-    flux_norm = integrated_flux * mcbnb_pot
-
     reco_df = ensure_lexsorted(reco_df, axis=1)
     true_df = ensure_lexsorted(true_df, axis=1)
 
-    reco_weights = reco_df.weights_mc.values.copy() / flux_norm
+    reco_weights = reco_df.weights_mc.values.copy()
     reco_weights[reco_mask] *= weight
 
-    true_weights = true_df.weights_mc.values.copy() / flux_norm
+    true_weights = true_df.weights_mc.values.copy()
     true_weights[true_mask] *= weight
 
     fd_ns = get_hist1d(
@@ -364,7 +369,7 @@ def make_fake_data_hists(
     if side_df is not None and ccbc_cov is not None:
         from .ccbc import get_constrained_background
         side_df = ensure_lexsorted(side_df, axis=1)
-        side_weights = side_df.weights_mc.values.copy() / flux_norm
+        side_weights = side_df.weights_mc.values.copy()
         if side_mask is not None:
             side_weights[side_mask] *= weight
         fd_nc = get_hist1d(
@@ -377,7 +382,7 @@ def make_fake_data_hists(
     backgr_df = reco_df[reco_df.signal != 0]
     cv_backgr_hist = get_hist1d(
         data=backgr_df[var.var_evt_reco_col], bins=var.bins,
-        weights=backgr_df.weights_mc / flux_norm,
+        weights=backgr_df.weights_mc,
     )
     fd_meas = fd_ns - cv_backgr_hist
     return fd_meas, fd_true, fd_ns, None, fd_Bs
@@ -391,7 +396,6 @@ def plot_unfolded_result(
     var: VariableConfig,
     truths: dict[str, np.ndarray],
     ax: plt.Axes | None = None,
-    xsec_scale: float = 1.0 / NTARGETS,
     truth_colors: dict[str, str] | None = None,
     chisq_label_fmt: Callable[[str, float, int], str] | None = None,
     show_norm_band: bool = True,
@@ -417,7 +421,12 @@ def plot_unfolded_result(
     Parameters
     ----------
     result : dict
-        WienerSVD output containing ``'unfold'``, ``'UnfoldCov'``, ``'AddSmear'``.
+        WienerSVD output containing ``'unfold'``, ``'UnfoldCov'``, ``'AddSmear'``,
+        and ``'xsec_scale'`` — stamped on by :meth:`UnfoldInput.unfold`.  The
+        scale is read from ``result['xsec_scale']`` so the truth overlays and
+        unfolded data point are guaranteed to be in matching units.  Truths
+        must be passed in absolute event-count units at mcbnb_pot
+        (e.g. ``unf_config.cv_signal``, ``fd_true``) — do not pre-scale them.
     var : VariableConfig
         Provides bin edges, display labels, and axis label pieces.
     truths : dict of {label: np.ndarray}
@@ -427,11 +436,6 @@ def plot_unfolded_result(
         prefix via ``chisq_label_fmt``.
     ax : matplotlib.axes.Axes, optional
         Pre-existing axes to draw on. A new figure+axes is created if None.
-    xsec_scale : float, optional
-        Scale factor applied to each ``AddSmear @ truth`` to bring it into the
-        same units as ``result['unfold']``. Defaults to ``1 / NTARGETS``
-        (cross-section per nucleon, matching the default in
-        :meth:`UnfoldInput.unfold`).
     truth_colors : dict of {label: color}, optional
         Per-label colour overrides. Unspecified labels fall back to
         ``_DEFAULT_TRUTH_COLORS`` cycled in dict-insertion order.
@@ -452,9 +456,9 @@ def plot_unfolded_result(
         Legend label for the unfolded errorbar.
     ylabel : str, optional
         Y-axis label. ``None`` (default) derives a differential cross-section
-        label from ``var`` (``d sigma/d<var> [cm^2 / <unit> / nucleon]``,
-        assuming ``xsec_scale = 1 / NTARGETS``). Pass a string to override, or
-        an empty string to skip setting the label.
+        label from ``var`` (``d sigma/d<var> [cm^2 / <unit> / nucleon]``),
+        which is correct when the default ``xsec_scale`` is used (true
+        cm²·nucleon⁻¹).  Pass a string to override, or an empty string to skip.
 
     Returns
     -------
@@ -468,9 +472,10 @@ def plot_unfolded_result(
     if not truths:
         raise ValueError("plot_unfolded_result requires at least one truth hist.")
 
-    unfold = result['unfold']
-    cov    = result['UnfoldCov']
-    smear  = result['AddSmear']
+    xsec_scale = result['xsec_scale']
+    unfold     = result['unfold']
+    cov        = result['UnfoldCov']
+    smear      = result['AddSmear']
 
     bins       = var.bins
     bin_labels = var.bin_labels

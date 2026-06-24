@@ -226,16 +226,16 @@ def get_ccbc_cov(
         ``cov_nc_nc``.  Default 1e-10.
     data_stat_nc : np.ndarray, shape (nbins, nbins), optional
         Data-statistical covariance on the observed control-region histogram
-        (same flux-averaged units as ``nc_output.rate_hist_cv``).  When given,
-        it is added to ``cov_nc_nc`` *before* the pseudoinverse — softening
+        (same absolute event-count units as ``nc_output.rate_hist_cv``).  When
+        given, it is added to ``cov_nc_nc`` *before* the pseudoinverse — softening
         the constraint, since a noisy sideband measurement should be trusted
-        less.  Typical Poisson form: ``np.diag(nc_raw_counts) / flux_norm**2``.
+        less.  Typical Poisson form: ``np.diag(nc_raw_counts)``.
         The returned ``cov_nc_nc`` block is left as the pure systematic for
         plotting; only ``pinv_nc_nc`` and the constrained blocks see the
         stat-augmented version.
     data_stat_ns : np.ndarray, shape (nbins, nbins), optional
         Data-statistical covariance on the observed total signal-region
-        histogram (same flux-averaged units as ``Bs_output.rate_hist_cv``).
+        histogram (same absolute event-count units as ``Bs_output.rate_hist_cv``).
         When given, it is added to both ``cov_ns_ns`` and ``cov_ms_ms`` after
         the constraint is applied.  The same matrix appears in both because
         the same observed total enters the unconstrained and constrained
@@ -309,6 +309,15 @@ def get_ccbc_cov(
         nc_cv = np.asarray(nc_output.rate_syst_dict[key].get("hist_cv", nc_output.rate_hist_cv))
         Ps_cv = np.asarray(Ps_output.xsec_syst_dict[key].get("hist_cv", Ps_output.rate_hist_cv))
 
+        # DetVar 'hists'/'hist_cv' are stored as events/sample_pot (raw stats of the
+        # detector-variation samples).  Rescale to events at mcbnb_pot so the resulting
+        # cross-covariances are on equal footing with the GENIE/Flux/MCstat contributions
+        # — which are already in events at mcbnb_pot.  Reweight-based keys are skipped.
+        if key_in_allowed(key, ("DetVar",)):
+            Bs_h, Bs_cv = Bs_h * Bs_output.mcbnb_pot, Bs_cv * Bs_output.mcbnb_pot
+            nc_h, nc_cv = nc_h * nc_output.mcbnb_pot, nc_cv * nc_output.mcbnb_pot
+            Ps_h, Ps_cv = Ps_h * Ps_output.mcbnb_pot, Ps_cv * Ps_output.mcbnb_pot
+
         cov_Bs_nc += nonsymmetric_cov(Bs_h, Bs_cv, nc_h, nc_cv)
         cov_Ps_nc += nonsymmetric_cov(Ps_h, Ps_cv, nc_h, nc_cv)
         cov_Ps_Bs += nonsymmetric_cov(Ps_h, Ps_cv, Bs_h, Bs_cv)
@@ -381,6 +390,10 @@ def get_ccbc_cov(
                     continue
                 ns_h = ns_output.xsec_syst_dict[key]["hists"]
                 ns_cv_key = np.asarray(ns_output.xsec_syst_dict[key].get("hist_cv", ns_output.rate_hist_cv))
+                # Same rescaling as in the main loop: DetVar 'hists'/'hist_cv' are
+                # events/sample_pot; bring them to events at mcbnb_pot before covariance.
+                if key_in_allowed(key, ("DetVar",)):
+                    ns_h, ns_cv_key = ns_h * ns_output.mcbnb_pot, ns_cv_key * ns_output.mcbnb_pot
                 cov_ns_ns_direct += nonsymmetric_cov(ns_h, ns_cv_key, ns_h, ns_cv_key)
 
             # Compare against the syst-only part of cov_ns_ns; data_stat_ns is
@@ -446,9 +459,8 @@ def get_constrained_background(
         Output of :func:`get_ccbc_cov`.  Must contain ``"Bs_output"``,
         ``"nc_output"``, ``"cov_Bs_nc"``, and ``"pinv_nc_nc"``.
     fd_nc_hist : np.ndarray, shape (nbins,)
-        Fake-data control-region histogram in flux-averaged event-rate units,
-        matching ``nc_output.rate_hist_cv``
-        (i.e. ``weights_mc / (integrated_flux * mcbnb_pot / 1e6)``-weighted).
+        Fake-data control-region histogram in absolute event-count units at
+        mcbnb_pot, matching ``nc_output.rate_hist_cv`` (i.e. ``weights_mc``-weighted).
 
     Returns
     -------
@@ -808,7 +820,7 @@ def plot_ccbc_summary(
         label="MC stat only",
     )
     ax_bs_main.set_title("Background only")
-    ax_bs_main.set_ylabel("Events (Flux-Averaged)")
+    ax_bs_main.set_ylabel("Events")
     ax_bs_main.legend(fontsize=9)
     ax_bs_main.set_xticks(bins)
     ax_bs_main.set_xticklabels(var_config.bin_labels, fontsize=8)
@@ -828,7 +840,7 @@ def plot_ccbc_summary(
         label="MC stat only",
     )
     ax_ns_main.set_title("Signal + Background")
-    ax_ns_main.set_ylabel("Events (Flux-Averaged)")
+    ax_ns_main.set_ylabel("Events")
     ax_ns_main.legend(fontsize=9)
     ax_ns_main.set_xticks(bins)
     ax_ns_main.set_xticklabels(var_config.bin_labels, fontsize=8)
@@ -900,8 +912,8 @@ def plot_ccbc_fd_comparison(
     * Errorbar points for the fake-data total (``fd_ns_hist``), labelled :math:`D_S`.
     * A chi-squared text annotation placed outside the legend.
 
-    All inputs must be in **flux-averaged event-rate units**
-    (``weights_mc / (integrated_flux * mcbnb_pot / 1e6)``), consistent with
+    All inputs must be in **absolute event-count units at mcbnb_pot**
+    (``weights_mc`` summed, no flux division), consistent with
     :class:`~nueana.classes.SystematicsOutput` and the outputs of
     :func:`~nueana.fdt.make_fake_data_hists`.
 
@@ -911,20 +923,20 @@ def plot_ccbc_fd_comparison(
         Output of :func:`get_ccbc_cov`.  Must contain ``Bs_output``,
         ``cov_Bs_nc``, ``pinv_nc_nc``, ``cov_ns_ns``, and ``cov_ms_ms``.
     fd_nc_hist : np.ndarray, shape (nbins,)
-        Fake-data control-region histogram in flux-averaged units.
+        Fake-data control-region histogram in absolute event-count units at mcbnb_pot.
         Passed to :func:`get_constrained_background` to derive B̂_S.
         Use ``fd_nc`` from :func:`~nueana.fdt.make_fake_data_hists`.
     fd_ns_hist : np.ndarray, shape (nbins,)
-        Fake-data total signal-region histogram in flux-averaged units
+        Fake-data total signal-region histogram in absolute event-count units at mcbnb_pot
         (before background subtraction).  Plotted as :math:`D_S`.
         Use ``fd_ns`` from :func:`~nueana.fdt.make_fake_data_hists`.
     fd_Bs_hist : np.ndarray, shape (nbins,)
-        True reweighted background histogram in flux-averaged units.
+        True reweighted background histogram in absolute event-count units at mcbnb_pot.
         Plotted as the "true background" reference line.
         Use ``fd_Bs`` from :func:`~nueana.fdt.make_fake_data_hists`.
     ns_hist : np.ndarray, shape (nbins,)
-        CV total signal-region prediction (P_S + B_S) in flux-averaged units
-        (e.g. ``ns_output.rate_hist_cv``).
+        CV total signal-region prediction (P_S + B_S) in absolute event-count units at
+        mcbnb_pot (e.g. ``ns_output.rate_hist_cv``).
     var_config : VariableConfig
         Bin edges and axis labels.
     axes : array-like of two Axes, optional
@@ -945,8 +957,8 @@ def plot_ccbc_fd_comparison(
         ``chisq_pre``      — χ² of the unconstrained prediction vs ``fd_ns_hist``
         ``chisq_post``     — χ² of the constrained prediction vs ``fd_ns_hist``
         ``ndof``           — number of bins used as the χ² degrees of freedom
-        ``constrained_ns`` — constrained total prediction in flux-averaged units
-        ``constrained_Bs`` — constrained background prediction in flux-averaged units
+        ``constrained_ns`` — constrained total prediction in absolute event-count units
+        ``constrained_Bs`` — constrained background prediction in absolute event-count units
     """
     Bs_cv          = np.asarray(ccbc_cov["Bs_output"].rate_hist_cv)
     constrained_Bs = get_constrained_background(ccbc_cov, fd_nc_hist)
@@ -999,7 +1011,7 @@ def plot_ccbc_fd_comparison(
         ax.tick_params(axis="y", labelsize=8)
         ax.legend(fontsize=9)
 
-    axes[0].set_ylabel("Flux-Averaged Event Rate")
+    axes[0].set_ylabel("Events")
     axes[1].tick_params(axis="y", labelleft=True)
 
     # Anchor chi-squared annotations just below each legend using the rendered
@@ -1077,6 +1089,12 @@ def plot_ccbc_blocks(
         nc_h  = nc_output.rate_syst_dict[key]["hists"]
         Bs_cv = np.asarray(Bs_output.rate_syst_dict[key].get("hist_cv", Bs_output.rate_hist_cv))
         nc_cv = np.asarray(nc_output.rate_syst_dict[key].get("hist_cv", nc_output.rate_hist_cv))
+
+        # DetVar entries hold events/sample_pot; rescale to events at mcbnb_pot
+        # so the assembled cov is in the same units as Bs_output.rate_hist_cv.
+        if key_in_allowed(key, ("DetVar",)):
+            Bs_h, Bs_cv = Bs_h * Bs_output.mcbnb_pot, Bs_cv * Bs_output.mcbnb_pot
+            nc_h, nc_cv = nc_h * nc_output.mcbnb_pot, nc_cv * nc_output.mcbnb_pot
 
         cov_Bs_nc += nonsymmetric_cov(Bs_h, Bs_cv, nc_h, nc_cv)
         cov_Bs_Bs += nonsymmetric_cov(Bs_h, Bs_cv, Bs_h, Bs_cv)
@@ -1160,6 +1178,13 @@ def plot_ccbc_key_correlations(
         nc_h  = np.asarray(nc_output.rate_syst_dict[key]["hists"])
         Bs_cv = np.asarray(Bs_output.rate_syst_dict[key].get("hist_cv", Bs_output.rate_hist_cv))
         nc_cv = np.asarray(nc_output.rate_syst_dict[key].get("hist_cv", nc_output.rate_hist_cv))
+
+        # DetVar entries hold events/sample_pot; rescale to events at mcbnb_pot so that
+        # unc_norm_Bs = sqrt(sum(cov_Bs)) / N_Bs is dimensionless.  Correlation is scale-
+        # invariant so the rescaling is needed only for the cov_Bs / cov_nc terms below.
+        if key_in_allowed(key, ("DetVar",)):
+            Bs_h, Bs_cv = Bs_h * Bs_output.mcbnb_pot, Bs_cv * Bs_output.mcbnb_pot
+            nc_h, nc_cv = nc_h * nc_output.mcbnb_pot, nc_cv * nc_output.mcbnb_pot
 
         # scalar fluctuation per universe: sum bins, subtract CV total
         delta_Bs = Bs_h.sum(axis=0) - Bs_cv.sum()   # shape (nuniv,)

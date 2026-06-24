@@ -7,7 +7,7 @@ from pyanalib.pandas_helpers import *
 
 from . import config
 
-__all__ = ['ensure_lexsorted', 'merge_hdr', 'apply_event_mask', 'digitize_with_overflow', 'get_hist1d', 'get_hist2d', 'flux_pot_weights']
+__all__ = ['ensure_lexsorted', 'merge_hdr', 'apply_event_mask', 'digitize_with_overflow', 'get_hist1d', 'get_hist2d']
 
 def ensure_lexsorted(frame, axis):
     """Ensure DataFrame axes are fully lexsorted when using MultiIndex.
@@ -139,24 +139,6 @@ def digitize_with_overflow(data, bins):
     return np.clip(np.searchsorted(bins, np.clip(a, bins[0], bins[-1]-1e-10), side='right') - 1,
                    0, n_bins - 1)
 
-
-def flux_pot_weights(df: pd.DataFrame, mcbnb_pot: float, integrated_flux: float) -> np.ndarray:
-    """Return flux+POT normalized per-event weights from ``weights_mc``.
-
-    Equivalent to the per-row formula::
-
-        flux_pot_norm = weights_mc / (integrated_flux * mcbnb_pot)
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        DataFrame carrying a ``weights_mc`` column.
-    mcbnb_pot : float
-        Reference BNB POT for the sample (absolute POT, not millions).
-    integrated_flux : float
-        Integrated nue+nuebar flux in cm⁻² POT⁻¹ (from :data:`nueana.analysis.integrated_flux`).
-    """
-    return df.weights_mc.values / (integrated_flux * mcbnb_pot)
 
 
 def get_hist1d(weights=None, data=None, bins=None, overflow=True, **kwargs):

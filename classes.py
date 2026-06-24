@@ -105,6 +105,9 @@ class XSecInputs:
 class SystematicsOutput:
     """
     Results of a systematics evaluation for a single variable.
+
+    All histograms and covariances are in **absolute event-count units at
+    mcbnb_pot** (i.e. ``weights_mc`` summed directly, no flux division).
     xsec_* fields are optional; check .has_xsec before accessing them.
     """
 

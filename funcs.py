@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 from dataclasses import replace
 
-from .utils import ensure_lexsorted, apply_event_mask, flux_pot_weights
+from .utils import ensure_lexsorted, apply_event_mask
 from .io import load_dfs
 from .selection import select
 from .selection import select_sideband
@@ -12,7 +12,7 @@ from .utils import get_hist1d
 from .syst import calc_matrices, get_syst, get_syst_df, get_detvar_systs
 from .detvar import load_detvar_dict
 from .classes import SystematicsOutput, SystematicsInput, XSecInputs
-from .analysis import integrated_flux, signal_dict, POT_NORM_UNC, NTARGETS_UNC
+from .analysis import signal_dict, POT_NORM_UNC, NTARGETS_UNC
 from .preprocess import preprocess_mc, add_pi0
 from . import config
 
@@ -94,8 +94,15 @@ def _collect_xsec_systs(indf, reco_var, bins, mcbnb_pot, xsec_hist_cv, xsec_inpu
     return syst_dict, total_cov, get_syst_df([syst_dict], xsec_hist_cv)
 
 
-def _collect_detvar_systs(detvar_dict, reco_var, bins, event_type, cuts, select_kwargs, rate_hist_cv, xsec_hist_cv=None):
+def _collect_detvar_systs(detvar_dict, reco_var, bins, event_type, cuts, select_kwargs, rate_hist_cv, xsec_hist_cv=None, mcbnb_pot=1.0):
     syst_dict = get_detvar_systs(detvar_dict, reco_var, bins, event_type=event_type, cuts=cuts, **select_kwargs)
+    # get_detvar_systs leaves 'hists' and 'hist_cv' as events/sample_pot — the raw statistics
+    # of each detector-variation sample.  Only 'cov' is rescaled to events² at mcbnb_pot so it
+    # sits on equal footing with the GENIE/Flux/MCstat covariances stored in SystematicsOutput.
+    # Callers that rebuild covariances from 'hists'/'hist_cv' (e.g. ccbc.get_ccbc_cov) must
+    # apply the same mcbnb_pot² scaling themselves.
+    for entry in syst_dict.values():
+        entry['cov'] = entry['cov'] * mcbnb_pot ** 2
     total_cov = _sum_covariances_from_dicts([syst_dict], rate_hist_cv.size)
     rate_df = get_syst_df([syst_dict], rate_hist_cv)
     xsec_df = get_syst_df([syst_dict], xsec_hist_cv) if xsec_hist_cv is not None else None
@@ -331,8 +338,8 @@ def get_intime_cov(selected_df, var, bins,
     selected_df = apply_event_mask(ensure_lexsorted(selected_df, axis=1), event_type)
     mcint_df = apply_event_mask(ensure_lexsorted(mcint_df, axis=1))
 
-    selected_fpw = flux_pot_weights(selected_df, mcbnb_pot, integrated_flux)
-    mcint_fpw    = np.full(len(mcint_df), scale / (integrated_flux * mcbnb_pot))
+    selected_fpw = selected_df.weights_mc.values
+    mcint_fpw    = np.full(len(mcint_df), scale)
 
     rate_hist_cv = get_hist1d(data=selected_df[var], bins=bins, weights=selected_fpw)
 
@@ -484,7 +491,7 @@ def get_total_cov(reco_df, reco_var, bins, mcbnb_pot,
 
     # CV histograms
     sorted_df = apply_event_mask(ensure_lexsorted(reco_df, axis=1), event_type)
-    _fpw = flux_pot_weights(sorted_df, mcbnb_pot, integrated_flux)
+    _fpw = sorted_df.weights_mc.values
     rate_hist_cv = get_hist1d(data=sorted_df[reco_var], weights=_fpw, bins=bins)
     signal_mask = sorted_df.signal == 0
     xsec_hist_cv = get_hist1d(data=sorted_df[signal_mask][reco_var], weights=_fpw[signal_mask], bins=bins)
@@ -512,6 +519,7 @@ def get_total_cov(reco_df, reco_var, bins, mcbnb_pot,
         d, c, rate_df, xsec_df = _collect_detvar_systs(
             detvar_dict, reco_var, bins, event_type, cuts, select_kwargs, rate_hist_cv,
             xsec_hist_cv=xsec_hist_cv if include_xsec else None,
+            mcbnb_pot=mcbnb_pot,
         )
         rate_syst_dict.update(d); rate_total_cov += c; rate_syst_frames.append(rate_df)
         if include_xsec:
@@ -522,18 +530,18 @@ def get_total_cov(reco_df, reco_var, bins, mcbnb_pot,
             get_hist1d(data=sorted_df[reco_var], weights=sorted_df.weights_mc, bins=bins)
             * (projected_pot / mcbnb_pot)
         )
-        flux_scale = integrated_flux * projected_pot
-        data_unc = np.divide(data_err, flux_scale * rate_hist_cv,
+        pot_scale = projected_pot / mcbnb_pot
+        data_unc = np.divide(data_err, pot_scale * rate_hist_cv,
                              out=np.zeros_like(data_err, dtype=float), where=rate_hist_cv > 0)
-        _data_unc_norm = float(np.sqrt(np.sum(data_err**2))) / (flux_scale * float(np.sum(rate_hist_cv))) if np.sum(rate_hist_cv) > 0 else 0.0
+        _data_unc_norm = float(np.sqrt(np.sum(data_err**2))) / (pot_scale * float(np.sum(rate_hist_cv))) if np.sum(rate_hist_cv) > 0 else 0.0
         rate_syst_frames.append(pd.DataFrame(
             {'key': ['Datastat'], 'category': ['Datastat'], 'unc_diag': [data_unc],
              'unc_diag_avg': [float(np.mean(data_unc))], 'unc_norm': [_data_unc_norm], 'top5': [False]}
         ))
         if include_xsec:
-            data_unc_xsec = np.divide(data_err, flux_scale * xsec_hist_cv,
+            data_unc_xsec = np.divide(data_err, pot_scale * xsec_hist_cv,
                                       out=np.zeros_like(data_err, dtype=float), where=xsec_hist_cv > 0)
-            _data_unc_norm_xsec = float(np.sqrt(np.sum(data_err**2))) / (flux_scale * float(np.sum(xsec_hist_cv))) if np.sum(xsec_hist_cv) > 0 else 0.0
+            _data_unc_norm_xsec = float(np.sqrt(np.sum(data_err**2))) / (pot_scale * float(np.sum(xsec_hist_cv))) if np.sum(xsec_hist_cv) > 0 else 0.0
             xsec_syst_frames.append(pd.DataFrame(
                 {'key': ['Datastat'], 'category': ['Datastat'], 'unc_diag': [data_unc_xsec],
                  'unc_diag_avg': [float(np.mean(data_unc_xsec))], 'unc_norm': [_data_unc_norm_xsec], 'top5': [False]}
@@ -655,7 +663,7 @@ def get_data_mc_ratio(
 
     if isinstance(systs, SystematicsInput) or type(systs).__name__ == 'SystematicsInput':
         out = get_total_cov(reco_df=mc_df, reco_var=_var, bins=_bins, **systs.to_kwargs())
-        hist_scale = integrated_flux * systs.mcbnb_pot * scale
+        hist_scale = scale
         mc_total    = mc_total_raw * hist_scale
         rate_cov    = np.asarray(out.rate_cov) * hist_scale**2
         total_var   = float(rate_cov.sum())

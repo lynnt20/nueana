@@ -76,7 +76,7 @@ __all__ = [
 # Physical and detector constants
 # ---------------------------------------------------------------------------
 
-RHO = 1.3836        # g/cm3, liquid Ar density
+RHO = 1.38434        # g/cm3, liquid Ar density
 N_A = 6.02214076e23 # Avogadro's number
 M_AR = 40           # g, molar mass of argon
 # FV_split_truncY_eastonly: 5 < |x| < 190, |y| < 190, 10 < z < 250 (both TPCs)

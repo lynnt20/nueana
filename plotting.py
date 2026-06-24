@@ -40,7 +40,6 @@ from .analysis import (signal_dict, signal_categories, signal_categories_externa
                        generic_dict, generic_categories,
                        pdg_categories,
                        mode_dict, mode_categories,
-                       integrated_flux,
                        detvar_subcat_dict)
 from .utils import ensure_lexsorted
 from .syst import get_syst
@@ -390,16 +389,14 @@ def plot_var(indf: pd.DataFrame,
         # Case 1: call get_total_cov on-the-fly with the bundled parameters.
         from .funcs import get_total_cov
         _output = get_total_cov(reco_df=indf, reco_var=var, bins=bins, **systs.to_kwargs())
-        _hist_scale = integrated_flux * systs.mcbnb_pot
-        total_cov, systs_arr, syst_dict, calc_separate_mcstat = _apply_syst_output(_output, _hist_scale)
+        total_cov, systs_arr, syst_dict, calc_separate_mcstat = _apply_syst_output(_output, 1.0)
         _syst_source = 'full'
 
     elif isinstance(systs, SystematicsOutput) or type(systs).__name__ == 'SystematicsOutput':
         # Case 2: caller already ran get_total_cov and passes the result directly.
         if systs.mcbnb_pot is None:
             raise ValueError("SystematicsOutput.mcbnb_pot is not set; use get_total_cov to produce it")
-        _hist_scale = integrated_flux * systs.mcbnb_pot
-        total_cov, systs_arr, syst_dict, calc_separate_mcstat = _apply_syst_output(systs, _hist_scale)
+        total_cov, systs_arr, syst_dict, calc_separate_mcstat = _apply_syst_output(systs, 1.0)
         _syst_source = 'full'
 
     elif systs is True:
@@ -1002,8 +999,8 @@ def plot_syst_category_breakdown(
 
         if show_cv:
             plt.subplots_adjust(wspace=0.5)
-            flux_scale = integrated_flux * projected_pot
-            cv_counts = cv_hist * flux_scale
+            pot_scale = projected_pot / syst_output.mcbnb_pot
+            cv_counts = cv_hist * pot_scale
             ax_cv = ax.twinx()
             ax_cv.stairs(cv_counts, bins, fill=True, alpha=0.25, color='steelblue', lw=0)
             ax_cv.set_ylim(bottom=0, top=np.max(cv_counts) * 1.25)

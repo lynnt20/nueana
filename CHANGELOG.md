@@ -5,6 +5,47 @@ top each time changes are merged that other users should know about.
 
 ---
 
+## 2026-06-23 — Switch internal histogram units to absolute events at mcbnb_pot [BREAKING]
+
+### Breaking change
+
+**All histograms, covariances, and universe arrays produced by `get_total_cov`,
+`UnfoldInput.build`, and `make_fake_data_hists` are now in absolute event-count
+units at the sample's nominal POT (`weights_mc` summed directly, no flux division).**
+
+Previously these quantities were in flux-averaged event-rate units
+(`weights_mc / (integrated_flux * mcbnb_pot)`). The new convention is simpler and
+avoids the misleading implication that the nue+nuebar flux is the correct
+normalization for all event categories.
+
+**What changes for callers:**
+
+- `SystematicsOutput.rate_hist_cv`, `rate_cov`, `xsec_hist_cv`, `xsec_cov`,
+  `rate_syst_dict`, `xsec_syst_dict` — all now in event² or event units at
+  `mcbnb_pot`. Multiply by `projected_pot / mcbnb_pot` to project to a different POT.
+- `UnfoldInput` now carries a required `mcbnb_pot` field (populated by `build()`
+  from `syst_output.mcbnb_pot`). `unfold()` default `xsec_scale` is now
+  `1 / (integrated_flux * self.mcbnb_pot * NTARGETS)` — true cm²·nucleon⁻¹ units,
+  no extra factor required from the caller. The resolved value is stamped onto
+  `result['xsec_scale']`.
+- `plot_unfolded_result()` no longer accepts an `xsec_scale` argument. It reads
+  it from `result['xsec_scale']`, so the unfolded data point and truth overlays
+  cannot drift out of sync. Pass truths as raw events at mcbnb_pot
+  (`unf_config.cv_signal`, `fd_true`) — do not pre-scale them.
+- DetVar systematics: `funcs._collect_detvar_systs` rescales only `entry['cov']`
+  by `mcbnb_pot²` (events² at mcbnb_pot); `hists` and `hist_cv` stay as raw
+  events/sample_pot. The four CCBC call sites that rebuild covariances from
+  `hists` (`ccbc.get_ccbc_cov`, `plot_ccbc_blocks`, `plot_ccbc_key_correlations`)
+  now apply the `mcbnb_pot` scaling inline for DetVar keys so cross-region
+  covariances are on equal footing with GENIE/Flux/MCstat contributions.
+- `flux_pot_weights` utility function is deleted. Replace with `df.weights_mc.values`.
+- `plot_var` / `plot_mc_data` error bands are unaffected — internal scaling updated.
+- CCBC inputs (`fd_nc`, `fd_ns`, `fd_Bs` from `make_fake_data_hists`) are now in
+  absolute event units. `data_stat_nc` Poisson form: `np.diag(nc_raw_counts)` (no
+  `/ flux_norm**2`).
+
+---
+
 ## 2026-05-28 — Plotting refinements, xsec covariance fix, sideband example notebook
 
 ### Bug fixes

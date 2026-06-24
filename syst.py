@@ -33,8 +33,7 @@ __all__ = [
 from .utils import ensure_lexsorted, apply_event_mask
 from .utils import get_hist1d, get_hist2d, digitize_with_overflow
 from .selection import select
-from .analysis import define_signal, integrated_flux
-from .utils import flux_pot_weights
+from .analysis import define_signal
 from .classes import XSecInputs
 from makedf.geniesyst import regen_systematics, ar23p_genie_systematics
     
@@ -304,9 +303,7 @@ def get_syst_hists(reco_df: pd.DataFrame,
                     break
             break
 
-    if scale and mcbnb_pot is not None:
-        scaling = flux_pot_weights(reco_df, mcbnb_pot, integrated_flux)
-    elif 'weights_mc' in reco_df.columns.get_level_values(0):
+    if scale and 'weights_mc' in reco_df.columns.get_level_values(0):
         scaling = reco_df.weights_mc.values.ravel()
     else:
         scaling = np.ones(reco_df.shape[0])
@@ -577,7 +574,7 @@ def get_detvar_systs(detvar_dict, var, bins,
         this_dict = detvar_dict[key]
         this_dv   = this_dict['dv_df']
         this_cv   = this_dict['cv_df']
-        this_norm = integrated_flux * this_dict['pot']
+        this_norm = this_dict['pot']
 
         def _ensure_signal(df):
             """Add the signal column via define_signal if it is missing."""
