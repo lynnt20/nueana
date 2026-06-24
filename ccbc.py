@@ -68,6 +68,44 @@ def _construct_full_cov(
     return np.block([[left, lr], [lr.T, right]])
 
 
+def _iter_shared_keys(nc_dict, Bs_dict, allowed_keys, extra_dict=None):
+    """Yield keys present in nc_dict and Bs_dict that pass key_in_allowed.
+
+    When extra_dict is provided, also requires key in extra_dict.
+    """
+    for key in nc_dict:
+        if not key_in_allowed(key, allowed_keys):
+            continue
+        if key not in Bs_dict:
+            continue
+        if extra_dict is not None and key not in extra_dict:
+            continue
+        yield key
+
+
+def _rescale_detvar(h, cv, output, key):
+    """Rescale DetVar hists from events/sample_pot to events at mcbnb_pot."""
+    if key_in_allowed(key, ("DetVar",)):
+        return h * output.mcbnb_pot, cv * output.mcbnb_pot
+    return h, cv
+
+
+def _norm_pct(cov: np.ndarray, hist: np.ndarray) -> float:
+    """Fractional normalization uncertainty in percent: sqrt(sum(cov)) / sum(hist) * 100."""
+    return float(np.sqrt(np.sum(cov)) / np.sum(hist) * 100)
+
+
+def _chisq_str(chisq: float, sub: str, ndof: int) -> str:
+    """Format χ²/dof legend label with subscript notation and p-value when scipy is available."""
+    base = rf"$\chi^2_{{\rm {sub}}}$/dof = {chisq:.1f}/{ndof}"
+    try:
+        from scipy.stats import chi2 as _chi2
+        p = 1.0 - _chi2.cdf(chisq, df=ndof)
+        return base + rf", $p$ = {p:.2g}"
+    except Exception:
+        return base
+
+
 def _annotate_block_axes(axes, nbins: int, var: str) -> None:
     """Draw the B_S / n_C dividing line and region labels on block-matrix heatmap axes."""
     for ax in axes:
@@ -166,11 +204,6 @@ def get_ccbc_cov(
 ) -> dict[str, np.ndarray]:
     """Assemble CCBC block covariance matrices and apply the sideband constraint.
 
-    Iterates over all universe systematics in ``nc_output.rate_syst_dict`` whose
-    key contains any string from ``allowed_keys``, accumulates six covariance
-    blocks via :func:`nonsymmetric_cov`, then computes the constraint-reduced
-    background and total-rate covariances.
-
     The constraint formula is:
 
     .. math::
@@ -178,100 +211,47 @@ def get_ccbc_cov(
         C_{B_S B_S}^{\\rm constr} = C_{B_S B_S}
             - C_{B_S n_C}\\, C_{n_C n_C}^{+}\\, C_{B_S n_C}^T
 
-        C_{P_S B_S}^{\\rm constr} = C_{P_S B_S}
-            - C_{P_S n_C}\\, C_{n_C n_C}^{+}\\, C_{B_S n_C}^T
-
         C_{m_S m_S} = C_{P_S P_S}
             + C_{P_S B_S}^{\\rm constr}
             + (C_{P_S B_S}^{\\rm constr})^T
             + C_{B_S B_S}^{\\rm constr}
 
-    where :math:`C^+` denotes the Moore–Penrose pseudoinverse.
-
-    Signal-component (P_S) covariance is built from ``Ps_output.xsec_syst_dict``
-    (response-matrix universe histograms) to capture the absolute cross-section
-    uncertainty rather than a plain rate uncertainty.  Background (B_S) and
-    control-region (n_C) components use ``rate_syst_dict`` (plain weighted
-    bincounts).  The CV used throughout is always ``rate_hist_cv``.
-
-    When ``ns_output`` is supplied, the on-the-fly ``cov_ns_ns`` is cross-checked
-    against ``ns_output.xsec_syst_dict``.  The identity holds exactly when
-    ``ns_h_xsec[key] = Ps_h_xsec[key] + Bs_h_rate[key]`` — i.e. the background
-    component of the n_S xsec universe histograms equals the B_S rate universe
-    histograms.  A mismatch warns that the inputs are inconsistent.
+    P_S uses ``xsec_syst_dict`` (response-matrix universe histograms); B_S and
+    n_C use ``rate_syst_dict``.  DetVar entries are rescaled from events/sample_pot
+    to events at mcbnb_pot before covariance accumulation.
 
     Parameters
     ----------
     Bs_output : SystematicsOutput
-        ``get_total_cov`` result for background-only signal-region events
-        (``event_type='background'``).
+        Background-only signal-region sample (``event_type='background'``).
     Ps_output : SystematicsOutput
-        ``get_total_cov`` result for signal-only signal-region events
-        (``event_type='signal'``, ``xsec_inputs`` required so that
-        ``xsec_syst_dict`` is populated with response-matrix universe histograms).
+        Signal-only signal-region sample (``xsec_syst_dict`` must be populated).
     nc_output : SystematicsOutput
-        ``get_total_cov`` result for control-region events
-        (``select_region='control'``).
+        Control-region sample (``select_region='control'``).
     ns_output : SystematicsOutput, optional
-        ``get_total_cov`` result for the total signal-region sample (P_S + B_S),
-        called with ``xsec_inputs`` so that ``xsec_syst_dict`` is populated.
-        When provided, ``cov_ns_ns`` is cross-checked against
-        ``ns_output.xsec_syst_dict``; a warning is raised if the relative
-        element-wise difference exceeds 1e-6.
+        Total signal-region sample used to cross-check cov_ns_ns consistency.
+        A warning is raised when the relative element-wise difference exceeds 1e-6.
     allowed_keys : sequence of str
-        A universe key is included when any element of this sequence appears as
-        a substring of the key string. Defaults to GENIE, Flux, Geant4, MCstat.
+        Keys included when any element appears as a substring. Default: GENIE, Flux,
+        Geant4, MCstat.
     rcond : float
-        Regularisation cut-off for ``np.linalg.pinv`` applied to
-        ``cov_nc_nc``.  Default 1e-10.
+        Regularisation cut-off for ``np.linalg.pinv(cov_nc_nc)``. Default 1e-10.
     data_stat_nc : np.ndarray, shape (nbins, nbins), optional
-        Data-statistical covariance on the observed control-region histogram
-        (same absolute event-count units as ``nc_output.rate_hist_cv``).  When
-        given, it is added to ``cov_nc_nc`` *before* the pseudoinverse — softening
-        the constraint, since a noisy sideband measurement should be trusted
-        less.  Typical Poisson form: ``np.diag(nc_raw_counts)``.
-        The returned ``cov_nc_nc`` block is left as the pure systematic for
-        plotting; only ``pinv_nc_nc`` and the constrained blocks see the
-        stat-augmented version.
+        Poisson data-statistical covariance on n_C, added to cov_nc_nc before the
+        pseudoinverse to soften the constraint. Typical form: ``np.diag(nc_raw_counts)``.
     data_stat_ns : np.ndarray, shape (nbins, nbins), optional
-        Data-statistical covariance on the observed total signal-region
-        histogram (same absolute event-count units as ``Bs_output.rate_hist_cv``).
-        When given, it is added to both ``cov_ns_ns`` and ``cov_ms_ms`` after
-        the constraint is applied.  The same matrix appears in both because
-        the same observed total enters the unconstrained and constrained
-        background-subtracted measurements.
+        Poisson data-statistical covariance on n_S, added to cov_ns_ns and cov_ms_ms.
 
     Returns
     -------
-    dict with keys:
-    ``cov_Bs_Bs``            — pre-constraint background auto-covariance
-        ``cov_Bs_Bs_constr``     — post-constraint background auto-covariance
-                                   (incorporates ``data_stat_nc`` via the softened pinv)
-        ``cov_ns_ns``            — pre-constraint total-rate covariance
-                                   (includes ``data_stat_ns`` if given)
-        ``cov_ms_ms``            — post-constraint total-rate covariance
-                                   (includes ``data_stat_ns`` if given, plus ``data_stat_nc``
-                                   propagated through the constraint)
-        ``cov_Ps_Ps``            — signal-component auto-covariance
-        ``cov_Ps_Bs``            — signal × background cross-covariance
-        ``cov_Ps_Bs_constr``     — post-constraint signal × background cross-covariance
-        ``cov_Bs_nc``            — background × control cross-covariance
-        ``cov_Ps_nc``            — signal × control cross-covariance
-        ``cov_nc_nc``            — control-region auto-covariance
-        ``norm_cov_Bs_Bs``       — scalar (1-bin) pre-constraint background variance
-        ``norm_cov_Bs_Bs_constr``— scalar (1-bin) post-constraint background variance
-        ``norm_cov_ns_ns``       — scalar (1-bin) pre-constraint total variance
-        ``norm_cov_ms_ms``       — scalar (1-bin) post-constraint total variance
-        ``pinv_nc_nc``           — Moore-Penrose pseudoinverse of the symmetrised cov_nc_nc
-        ``nc_output``            — pass-through of the nc_output argument
-
-    The four ``norm_cov_*`` scalars use the rate-only (plain bincount) universe
-    histograms for all three components so that the implied normalization
-    uncertainty percentage is independent of which variable is being binned.
-
-    ``pinv_nc_nc`` and ``nc_output`` are stored so that
-    :func:`get_constrained_background` can apply the CCBC linear predictor
-    without the caller having to re-supply or recompute them.
+    dict
+        ``cov_Bs_Bs``, ``cov_Bs_Bs_constr``, ``cov_ns_ns``, ``cov_ms_ms``,
+        ``cov_Ps_Ps``, ``cov_Ps_Bs``, ``cov_Ps_Bs_constr``, ``cov_Bs_nc``,
+        ``cov_Ps_nc``, ``cov_nc_nc`` — covariance blocks in event-count² units.
+        ``norm_cov_Bs_Bs``, ``norm_cov_Bs_Bs_constr``, ``norm_cov_ns_ns``,
+        ``norm_cov_ms_ms`` — scalar variable-independent normalization variances.
+        ``pinv_nc_nc`` — pseudoinverse of symmetrised cov_nc_nc (stat-augmented if given).
+        ``Bs_output``, ``ns_output``, ``nc_output`` — pass-throughs for downstream functions.
     """
     nc_keys = set(nc_output.rate_syst_dict)
     _warn_key_mismatch(nc_keys, set(Bs_output.rate_syst_dict), "nc_output", "Bs_output")
@@ -288,35 +268,22 @@ def get_ccbc_cov(
     # Scalar (1-bin) rate-only accumulators for variable-independent norm percentages.
     norm_Ps_Ps = 0.0;  norm_Ps_Bs = 0.0;  norm_Ps_nc = 0.0
 
-    for key in nc_output.rate_syst_dict:
-        if not key_in_allowed(key, allowed_keys):
-            continue
-        if key not in Bs_output.rate_syst_dict:
-            continue
-        if Ps_output.xsec_syst_dict is None or key not in Ps_output.xsec_syst_dict:
-            continue
-
+    Ps_xsec = Ps_output.xsec_syst_dict if Ps_output.xsec_syst_dict is not None else {}
+    for key in _iter_shared_keys(nc_output.rate_syst_dict, Bs_output.rate_syst_dict,
+                                  allowed_keys, extra_dict=Ps_xsec):
         Bs_h  = Bs_output.rate_syst_dict[key]["hists"]
         nc_h  = nc_output.rate_syst_dict[key]["hists"]
-        Ps_h  = Ps_output.xsec_syst_dict[key]["hists"]
+        Ps_h  = Ps_xsec[key]["hists"]
 
-        # For keys that store their own CV (DetVar alternative-simulation keys),
-        # use it as the baseline so the covariance captures only the detector
-        # variation effect and not any offset between the DetVar CV run and the
-        # main analysis MC.  GENIE/Flux/MCstat entries have no "hist_cv" and
-        # fall back to rate_hist_cv, which is correct for reweight-based systematics.
+        # DetVar keys store their own CV to capture only the detector variation
+        # effect; GENIE/Flux/MCstat fall back to rate_hist_cv.
         Bs_cv = np.asarray(Bs_output.rate_syst_dict[key].get("hist_cv", Bs_output.rate_hist_cv))
         nc_cv = np.asarray(nc_output.rate_syst_dict[key].get("hist_cv", nc_output.rate_hist_cv))
-        Ps_cv = np.asarray(Ps_output.xsec_syst_dict[key].get("hist_cv", Ps_output.rate_hist_cv))
+        Ps_cv = np.asarray(Ps_xsec[key].get("hist_cv", Ps_output.rate_hist_cv))
 
-        # DetVar 'hists'/'hist_cv' are stored as events/sample_pot (raw stats of the
-        # detector-variation samples).  Rescale to events at mcbnb_pot so the resulting
-        # cross-covariances are on equal footing with the GENIE/Flux/MCstat contributions
-        # — which are already in events at mcbnb_pot.  Reweight-based keys are skipped.
-        if key_in_allowed(key, ("DetVar",)):
-            Bs_h, Bs_cv = Bs_h * Bs_output.mcbnb_pot, Bs_cv * Bs_output.mcbnb_pot
-            nc_h, nc_cv = nc_h * nc_output.mcbnb_pot, nc_cv * nc_output.mcbnb_pot
-            Ps_h, Ps_cv = Ps_h * Ps_output.mcbnb_pot, Ps_cv * Ps_output.mcbnb_pot
+        Bs_h, Bs_cv = _rescale_detvar(Bs_h, Bs_cv, Bs_output, key)
+        nc_h, nc_cv = _rescale_detvar(nc_h, nc_cv, nc_output, key)
+        Ps_h, Ps_cv = _rescale_detvar(Ps_h, Ps_cv, Ps_output, key)
 
         cov_Bs_nc += nonsymmetric_cov(Bs_h, Bs_cv, nc_h, nc_cv)
         cov_Ps_nc += nonsymmetric_cov(Ps_h, Ps_cv, nc_h, nc_cv)
@@ -381,19 +348,11 @@ def get_ccbc_cov(
             )
         else:
             cov_ns_ns_direct = zeros()
-            for key in nc_output.rate_syst_dict:
-                if not key_in_allowed(key, allowed_keys):
-                    continue
-                if key not in Bs_output.rate_syst_dict:
-                    continue
-                if key not in ns_output.xsec_syst_dict:
-                    continue
-                ns_h = ns_output.xsec_syst_dict[key]["hists"]
+            for key in _iter_shared_keys(nc_output.rate_syst_dict, Bs_output.rate_syst_dict,
+                                          allowed_keys, extra_dict=ns_output.xsec_syst_dict):
+                ns_h      = ns_output.xsec_syst_dict[key]["hists"]
                 ns_cv_key = np.asarray(ns_output.xsec_syst_dict[key].get("hist_cv", ns_output.rate_hist_cv))
-                # Same rescaling as in the main loop: DetVar 'hists'/'hist_cv' are
-                # events/sample_pot; bring them to events at mcbnb_pot before covariance.
-                if key_in_allowed(key, ("DetVar",)):
-                    ns_h, ns_cv_key = ns_h * ns_output.mcbnb_pot, ns_cv_key * ns_output.mcbnb_pot
+                ns_h, ns_cv_key = _rescale_detvar(ns_h, ns_cv_key, ns_output, key)
                 cov_ns_ns_direct += nonsymmetric_cov(ns_h, ns_cv_key, ns_h, ns_cv_key)
 
             # Compare against the syst-only part of cov_ns_ns; data_stat_ns is
@@ -606,10 +565,10 @@ def plot_ccbc_constraint(
         pre_ratio_ns  = np.sqrt(np.diag(pre_cov_ns))  / ns_hist
         post_ratio_ns = np.sqrt(np.diag(post_cov_ns)) / ns_hist
 
-        label_pre_Bs  = f"Pre-constraint ({np.sqrt(np.sum(pre_cov_Bs))  / np.sum(Bs_hist) * 100:.1f}%)"
-        label_post_Bs = f"Post-constraint ({np.sqrt(np.sum(post_cov_Bs)) / np.sum(Bs_hist) * 100:.1f}%)"
-        label_pre_ns  = f"Pre-constraint ({np.sqrt(np.sum(pre_cov_ns))  / np.sum(ns_hist) * 100:.1f}%)"
-        label_post_ns = f"Post-constraint ({np.sqrt(np.sum(post_cov_ns)) / np.sum(ns_hist) * 100:.1f}%)"
+        label_pre_Bs  = f"Pre-constraint ({_norm_pct(pre_cov_Bs,  Bs_hist):.1f}%)"
+        label_post_Bs = f"Post-constraint ({_norm_pct(post_cov_Bs, Bs_hist):.1f}%)"
+        label_pre_ns  = f"Pre-constraint ({_norm_pct(pre_cov_ns,  ns_hist):.1f}%)"
+        label_post_ns = f"Post-constraint ({_norm_pct(post_cov_ns, ns_hist):.1f}%)"
 
         # Row 1: B_S main
         axes_Bs_main[i].stairs(Bs_hist, bins, color="black", label=r"$B_S^{CV}$")
@@ -786,10 +745,10 @@ def plot_ccbc_summary(
     stat_ratio_Bs = stat_err_Bs / Bs_hist
     stat_ratio_ns = stat_err_ns / ns_hist
 
-    label_pre_Bs  = f"Pre-constraint ({np.sqrt(np.sum(pre_cov_Bs))  / np.sum(Bs_hist) * 100:.1f}%)"
-    label_post_Bs = f"Post-constraint ({np.sqrt(np.sum(post_cov_Bs)) / np.sum(Bs_hist) * 100:.1f}%)"
-    label_pre_ns  = f"Pre-constraint  ({np.sqrt(np.sum(pre_cov_ns))  / np.sum(ns_hist) * 100:.1f}%)"
-    label_post_ns = f"Post-constraint ({np.sqrt(np.sum(post_cov_ns)) / np.sum(ns_hist) * 100:.1f}%)"
+    label_pre_Bs  = f"Pre-constraint ({_norm_pct(pre_cov_Bs,  Bs_hist):.1f}%)"
+    label_post_Bs = f"Post-constraint ({_norm_pct(post_cov_Bs, Bs_hist):.1f}%)"
+    label_pre_ns  = f"Pre-constraint ({_norm_pct(pre_cov_ns,  ns_hist):.1f}%)"
+    label_post_ns = f"Post-constraint ({_norm_pct(post_cov_ns, ns_hist):.1f}%)"
 
     if axes is None:
         fig = plt.figure(figsize=(10, 5))
@@ -973,15 +932,6 @@ def plot_ccbc_fd_comparison(
     chisq_post = get_chisq_diff(fd_ns_hist - constrained_ns, cov_post)
     ndof = len(ns_hist)
 
-    try:
-        from scipy.stats import chi2 as _chi2
-        def _chisq_str(chisq: float, sub: str) -> str:
-            p = 1.0 - _chi2.cdf(chisq, df=ndof)
-            return rf"$\chi^2_{{\rm {sub}}}$/dof = {chisq:.1f}/{ndof}, $p$ = {p:.2g}"
-    except Exception:
-        def _chisq_str(chisq: float, sub: str) -> str:
-            return rf"$\chi^2_{{\rm {sub}}}$/dof = {chisq:.1f}/{ndof}"
-
     bins    = var_config.bins
     centers = var_config.bin_centers
 
@@ -1029,7 +979,7 @@ def plot_ccbc_fd_comparison(
         else:
             ann_x, ann_y, ann_ha = 0.97, 0.55, "right"
         ax.annotate(
-            _chisq_str(chisq, sub),
+            _chisq_str(chisq, sub, ndof),
             xy=(ann_x, ann_y),
             xycoords=ax.transAxes,
             xytext=(0, -4),
@@ -1079,23 +1029,13 @@ def plot_ccbc_blocks(
     zeros = lambda: np.zeros((nbins, nbins))
     cov_Bs_nc = zeros(); cov_nc_nc = zeros(); cov_Bs_Bs = zeros()
 
-    for key in nc_output.rate_syst_dict:
-        if not key_in_allowed(key, allowed_keys):
-            continue
-        if key not in Bs_output.rate_syst_dict:
-            continue
-
+    for key in _iter_shared_keys(nc_output.rate_syst_dict, Bs_output.rate_syst_dict, allowed_keys):
         Bs_h  = Bs_output.rate_syst_dict[key]["hists"]
         nc_h  = nc_output.rate_syst_dict[key]["hists"]
         Bs_cv = np.asarray(Bs_output.rate_syst_dict[key].get("hist_cv", Bs_output.rate_hist_cv))
         nc_cv = np.asarray(nc_output.rate_syst_dict[key].get("hist_cv", nc_output.rate_hist_cv))
-
-        # DetVar entries hold events/sample_pot; rescale to events at mcbnb_pot
-        # so the assembled cov is in the same units as Bs_output.rate_hist_cv.
-        if key_in_allowed(key, ("DetVar",)):
-            Bs_h, Bs_cv = Bs_h * Bs_output.mcbnb_pot, Bs_cv * Bs_output.mcbnb_pot
-            nc_h, nc_cv = nc_h * nc_output.mcbnb_pot, nc_cv * nc_output.mcbnb_pot
-
+        Bs_h, Bs_cv = _rescale_detvar(Bs_h, Bs_cv, Bs_output, key)
+        nc_h, nc_cv = _rescale_detvar(nc_h, nc_cv, nc_output, key)
         cov_Bs_nc += nonsymmetric_cov(Bs_h, Bs_cv, nc_h, nc_cv)
         cov_Bs_Bs += nonsymmetric_cov(Bs_h, Bs_cv, Bs_h, Bs_cv)
         cov_nc_nc += nonsymmetric_cov(nc_h, nc_cv, nc_h, nc_cv)
@@ -1168,23 +1108,14 @@ def plot_ccbc_key_correlations(
     N_nc = float(np.sum(nc_output.rate_hist_cv))
 
     records = []
-    for key in nc_output.rate_syst_dict:
-        if not key_in_allowed(key, allowed_keys):
-            continue
-        if key not in Bs_output.rate_syst_dict:
-            continue
-
+    for key in _iter_shared_keys(nc_output.rate_syst_dict, Bs_output.rate_syst_dict, allowed_keys):
         Bs_h  = np.asarray(Bs_output.rate_syst_dict[key]["hists"])  # (nbins, nuniv)
         nc_h  = np.asarray(nc_output.rate_syst_dict[key]["hists"])
         Bs_cv = np.asarray(Bs_output.rate_syst_dict[key].get("hist_cv", Bs_output.rate_hist_cv))
         nc_cv = np.asarray(nc_output.rate_syst_dict[key].get("hist_cv", nc_output.rate_hist_cv))
-
-        # DetVar entries hold events/sample_pot; rescale to events at mcbnb_pot so that
-        # unc_norm_Bs = sqrt(sum(cov_Bs)) / N_Bs is dimensionless.  Correlation is scale-
-        # invariant so the rescaling is needed only for the cov_Bs / cov_nc terms below.
-        if key_in_allowed(key, ("DetVar",)):
-            Bs_h, Bs_cv = Bs_h * Bs_output.mcbnb_pot, Bs_cv * Bs_output.mcbnb_pot
-            nc_h, nc_cv = nc_h * nc_output.mcbnb_pot, nc_cv * nc_output.mcbnb_pot
+        # Correlation is scale-invariant; rescaling is needed only so unc_norm_Bs is dimensionless.
+        Bs_h, Bs_cv = _rescale_detvar(Bs_h, Bs_cv, Bs_output, key)
+        nc_h, nc_cv = _rescale_detvar(nc_h, nc_cv, nc_output, key)
 
         # scalar fluctuation per universe: sum bins, subtract CV total
         delta_Bs = Bs_h.sum(axis=0) - Bs_cv.sum()   # shape (nuniv,)

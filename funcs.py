@@ -20,6 +20,7 @@ __all__ = [
     'get_corr_from_cov',
     'get_fractional_covariance',
     'chi_squared',
+    'format_chisq_label',
     'add_uncertainty',
     'add_fractional_uncertainty',
     'get_intime_cov',
@@ -72,6 +73,22 @@ def chi_squared(diff: np.ndarray, cov: np.ndarray) -> float:
         chi^2 = diff^T @ inv(cov) @ diff
     """
     return float(diff @ np.linalg.inv(cov) @ diff)
+
+
+def format_chisq_label(
+    label: str,
+    chisq: float,
+    ndof: int,
+    prefix: str = r"$A_C \otimes$ ",
+) -> str:
+    """Legend label with χ²/dof and p-value when scipy is available."""
+    base = prefix + label + "\n" + rf"$\chi^2$/dof={chisq:.1f}/{ndof}"
+    try:
+        from scipy.stats import chi2 as _chi2
+        pval = 1.0 - _chi2.cdf(chisq, df=ndof)
+        return base + f", $p$={pval:.2g}"
+    except Exception:
+        return base
 
 
 def _sum_covariances_from_dicts(syst_dicts, n_bins):

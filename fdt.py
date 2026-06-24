@@ -12,11 +12,11 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from collections.abc import Callable
 
-from .utils import get_hist1d, get_hist2d, ensure_lexsorted
+from .utils import get_hist1d, get_hist2d, ensure_lexsorted, bin_geometry
 from .classes import VariableConfig, SystematicsOutput
 from .syst import key_in_allowed, decompose_cov
 from .analysis import integrated_flux, NTARGETS
-from .funcs import chi_squared
+from .funcs import chi_squared, format_chisq_label
 
 __all__ = [
     'UnfoldInput',
@@ -27,16 +27,6 @@ __all__ = [
 
 
 _DEFAULT_TRUTH_COLORS = ["C0", "yellowgreen", "C3", "C4", "C5"]
-
-
-def _default_chisq_label(label: str, chisq: float, ndof: int) -> str:
-    base = r"$A_C \otimes$ " + label + "\n" + rf"$\chi^2$/dof={chisq:.1f}/{ndof}"
-    try:
-        from scipy.stats import chi2 as _chi2
-        pval = 1.0 - _chi2.cdf(chisq, df=ndof)
-        return base + f", $p$={pval:.2g}"
-    except Exception:
-        return base
 
 
 # ---------------------------------------------------------------------------
@@ -94,46 +84,29 @@ class UnfoldInput:
         wienersvd_fn : callable
             The WienerSVD function imported from cafpyana in the notebook.
         measure : np.ndarray, shape (n_reco,)
-            Background-subtracted measurement in absolute event-count units at
-            mcbnb_pot (output of :func:`make_fake_data_hists`).
+            Background-subtracted measurement in absolute event-count units at mcbnb_pot.
         allowed_keys : tuple of str or None, optional
-            Categories to include, matched via the same classification logic as
-            syst.py (e.g. ``('GENIE', 'MCstat')``). Each key in syst_covs is
-            classified into a category ('GENIE', 'Flux', 'MCstat', 'DetVar',
-            'Geant4') and included only if its category appears in allowed_keys.
-            GENIE aliases (SBNNuSyst, SuSAv2) are handled correctly. None
-            (default) includes all keys. Ignored when total_cov is provided.
+            Systematic categories to include (e.g. ``('GENIE', 'MCstat')``). None
+            includes all. Ignored when ``total_cov`` is provided.
         extra_cov : np.ndarray or None, optional
-            Additional covariance matrix in event-count² units, added after
-            summing syst_covs and applying xsec_scale². Use for fake-data or
-            data statistical uncertainty.
+            Extra covariance in event-count² units added after summing syst_covs.
+            Use for data/fake-data statistical uncertainty.
         xsec_scale : float, optional
-            Scale factor applied to convert from absolute event-count units to
-            cross-section units. Applied as ``xsec_scale`` to Signal and
-            Measure and ``xsec_scale²`` to the covariance.  Defaults to
-            ``1 / (integrated_flux * self.mcbnb_pot * NTARGETS)`` — true
-            differential cross-section units (cm²·nucleon⁻¹).  Pass ``1.0``
-            to keep absolute event-count units.  The resolved value is
-            stamped onto the returned dict as ``result['xsec_scale']`` so
-            :func:`plot_unfolded_result` can inherit it automatically.
+            Conversion from event-count units to cross-section units. Defaults to
+            ``1 / (integrated_flux * mcbnb_pot * NTARGETS)`` (true cm²·nucleon⁻¹).
+            Pass ``1.0`` to keep event-count units. Stamped on the returned dict.
         total_cov : np.ndarray or None, optional
-            Pre-built covariance matrix in event-count² units that replaces
-            the syst_covs summation entirely. Use to pass
-            ``ccbc_dict['cov_ms_ms']`` directly — its allowed-key selection
-            was already applied inside ``get_ccbc_cov``. allowed_keys is
-            ignored.
+            Pre-built covariance replacing syst_covs summation (e.g. ``ccbc_cov['cov_ms_ms']``).
         c_type : int, optional
-            WienerSVD smoothness matrix type (0=unit, 1=1st deriv, 2=2nd deriv,
-            3=3rd deriv). Default 2.
+            WienerSVD smoothness matrix type. Default 2 (2nd derivative).
         norm_type : float, optional
             WienerSVD signal normalisation exponent. Default 0.5.
 
         Returns
         -------
         dict
-            WienerSVD output dict with keys 'unfold', 'AddSmear', 'WF',
-            'UnfoldCov', 'CovRotation', plus the resolved 'xsec_scale' used
-            for unit conversion (consumed by :func:`plot_unfolded_result`).
+            WienerSVD output with keys 'unfold', 'AddSmear', 'WF', 'UnfoldCov',
+            'CovRotation', and 'xsec_scale'.
         """
         if xsec_scale is None:
             xsec_scale = 1.0 / (integrated_flux * self.mcbnb_pot * NTARGETS)
@@ -361,9 +334,10 @@ def make_fake_data_hists(
     fd_true = get_hist1d(
         data=true_df[var.var_nu_col], bins=var.bins, weights=true_weights,
     )
+    bg_weights = reco_weights.copy()
+    bg_weights[reco_df.signal.values == 0] = 0
     fd_Bs = get_hist1d(
-        data=reco_df[var.var_evt_reco_col], bins=var.bins,
-        weights=np.where(reco_df.signal.values != 0, reco_weights, 0),
+        data=reco_df[var.var_evt_reco_col], bins=var.bins, weights=bg_weights,
     )
 
     if side_df is not None and ccbc_cov is not None:
@@ -404,70 +378,37 @@ def plot_unfolded_result(
     data_label: str = "unfolded (fake) data",
     ylabel: str | None = None,
 ) -> dict:
-    """Plot an unfolded measurement with smeared-truth overlays, chi^2 labels,
-    and a normalisation-uncertainty band.
-
-    Encapsulates the cell 13/14 pattern: errorbar of the unfolded result
-    divided by display bin widths, one stairs per truth (each scaled by
-    ``AddSmear @ truth * xsec_scale`` and divided by widths) with a chi^2
-    annotation in the legend, plus an optional gray fill_between for the
-    normalisation-only component of UnfoldCov.
-
-    All histograms are plotted on ``var.bins`` positions but divided by
-    ``np.diff(var.bin_labels)`` for the y-axis density (so an overflow bin
-    with a display label far past its edge appears at its natural width on
-    the legend axis).
+    """Plot an unfolded measurement with smeared-truth overlays and a normalisation band.
 
     Parameters
     ----------
     result : dict
-        WienerSVD output containing ``'unfold'``, ``'UnfoldCov'``, ``'AddSmear'``,
-        and ``'xsec_scale'`` — stamped on by :meth:`UnfoldInput.unfold`.  The
-        scale is read from ``result['xsec_scale']`` so the truth overlays and
-        unfolded data point are guaranteed to be in matching units.  Truths
-        must be passed in absolute event-count units at mcbnb_pot
-        (e.g. ``unf_config.cv_signal``, ``fd_true``) — do not pre-scale them.
+        WienerSVD output with 'unfold', 'UnfoldCov', 'AddSmear', 'xsec_scale'.
+        Truths must be in absolute event-count units at mcbnb_pot (not pre-scaled).
     var : VariableConfig
         Provides bin edges, display labels, and axis label pieces.
     truths : dict of {label: np.ndarray}
-        At least one truth-bin histogram to overlay, keyed by legend label.
-        Each truth is scaled by ``AddSmear @ truth * xsec_scale`` and rendered
-        as a stairs plot. The keys are also used as the chi^2 legend label
-        prefix via ``chisq_label_fmt``.
+        Truth histograms to overlay. Keys become legend labels with chi^2 annotation.
     ax : matplotlib.axes.Axes, optional
-        Pre-existing axes to draw on. A new figure+axes is created if None.
+        Axes to draw on. Created if None.
     truth_colors : dict of {label: color}, optional
-        Per-label colour overrides. Unspecified labels fall back to
-        ``_DEFAULT_TRUTH_COLORS`` cycled in dict-insertion order.
+        Per-label colour overrides; unspecified labels cycle through _DEFAULT_TRUTH_COLORS.
     chisq_label_fmt : callable, optional
-        ``f(label, chisq, ndof) -> legend_str``. Defaults to a two-line
-        format with ``A_C ⊗`` prefix, chi^2/dof, and p-value.
+        ``f(label, chisq, ndof) -> str``. Defaults to :func:`~nueana.funcs.format_chisq_label`.
     show_norm_band : bool, optional
-        If True, decompose ``UnfoldCov`` around the first truth's smeared
-        prediction (or ``norm_band_ref``) and draw the diagonal-sqrt of the
-        normalisation component as a gray fill. Default True.
+        Decompose UnfoldCov and draw the normalisation component as a gray fill. Default True.
     norm_band_ref : str, optional
-        Truth key whose smeared prediction is used as the reference for
-        ``decompose_cov``. Default is the first key in ``truths``.
+        Truth key used as reference for decompose_cov. Default is the first key in truths.
     norm_band_label : str, optional
-        Legend label for the normalisation-uncertainty band. Pass ``None`` (or
-        an empty string) to keep the band but omit it from the legend.
+        Legend label for the norm band. Pass empty string to hide from legend.
     data_label : str, optional
         Legend label for the unfolded errorbar.
     ylabel : str, optional
-        Y-axis label. ``None`` (default) derives a differential cross-section
-        label from ``var`` (``d sigma/d<var> [cm^2 / <unit> / nucleon]``),
-        which is correct when the default ``xsec_scale`` is used (true
-        cm²·nucleon⁻¹).  Pass a string to override, or an empty string to skip.
+        Y-axis label. None derives a dσ/d<var> label; empty string skips it.
 
     Returns
     -------
-    dict with keys:
-        ``ax``       — the matplotlib Axes object.
-        ``chisq``    — ``{truth_label: float}`` chi^2 values.
-        ``ndof``     — number of bins (used as the chi^2 ndof).
-        ``cov_norm`` — normalisation-component covariance (None if disabled).
-        ``cov_shape``— shape-component covariance (None if disabled).
+    dict with keys ``ax``, ``chisq`` ({label: float}), ``ndof``, ``cov_norm``, ``cov_shape``.
     """
     if not truths:
         raise ValueError("plot_unfolded_result requires at least one truth hist.")
@@ -477,16 +418,14 @@ def plot_unfolded_result(
     cov        = result['UnfoldCov']
     smear      = result['AddSmear']
 
-    bins       = var.bins
-    bin_labels = var.bin_labels
-    centers    = 0.5 * (bins[:-1] + bins[1:])
-    widths     = np.diff(bin_labels)
-    nbins      = len(bins) - 1
+    bins             = var.bins
+    nbins            = len(bins) - 1
+    centers, widths  = bin_geometry(var)
 
     if ax is None:
         _, ax = plt.subplots()
     if chisq_label_fmt is None:
-        chisq_label_fmt = _default_chisq_label
+        chisq_label_fmt = format_chisq_label
     if truth_colors is None:
         truth_colors = {}
 
@@ -524,7 +463,7 @@ def plot_unfolded_result(
         )
 
     ax.set_xticks(bins)
-    ax.set_xticklabels(bin_labels)
+    ax.set_xticklabels(var.bin_labels)
     ax.set_xlabel(var.var_labels[0],fontsize=12)
     if ylabel is None:
         plot_math = var.var_plot_name.strip("$")
