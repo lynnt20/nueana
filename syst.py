@@ -623,7 +623,7 @@ _DETVAR_SUBCATEGORIES: list[tuple[str, list[str]]] = [
     ("calorimetry", ["ccal", "phi", "alpha", "beta90", "beta_90", "betap90","Ecorr",'yz','calo']),
 ]
 
-_CATEGORY_KEYWORDS = ["GENIE", "Flux", "MCstat", "DetVar", "Geant4"]
+_CATEGORY_KEYWORDS = ["GENIE", "Flux", "MCstat", "DetVar", "Geant4","Cosmic",'NTargets','BeamExposure']
 
 
 def _extract_genie_key(key: str) -> str:

@@ -371,7 +371,7 @@ def electron_energy() -> VariableConfig:
         var_plot_name="$E_{e-}$",
         var_unit="GeV",
         bins=np.array([0.5, 0.7, 0.95, 1.25, 1.7, 2.5]),
-        bin_labels=np.array([0.5, 0.7, 0.95, 1.25, 1.7, 5]),
+        bin_labels=np.array([0.5, 0.7, 0.95, 1.25, 1.7, 2.5]),
         var_evt_reco_col=('primshw', 'shw', 'reco_energy'),
         var_evt_truth_col=('slc', 'truth', 'e', 'genE'),
         var_nu_col=('e', 'genE'),
