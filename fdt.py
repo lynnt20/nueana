@@ -6,6 +6,7 @@ cross the cafpyana boundary.
 """
 from __future__ import annotations
 
+import warnings
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -66,6 +67,7 @@ class UnfoldInput:
     cv_signal: np.ndarray
     syst_covs: dict
     mcbnb_pot: float
+
     def unfold(
         self,
         wienersvd_fn: Callable,
@@ -111,6 +113,12 @@ class UnfoldInput:
         if xsec_scale is None:
             xsec_scale = 1.0 / (integrated_flux * self.mcbnb_pot * NTARGETS)
         n_bins = self.cv_signal.shape[0]
+        measure = np.asarray(measure)
+        if measure.shape != (self.response.shape[0],):
+            raise ValueError(
+                f"measure has shape {measure.shape} but response expects "
+                f"({self.response.shape[0]},) reco bins"
+            )
         if total_cov is not None:
             cov = total_cov
         else:
@@ -339,6 +347,13 @@ def make_fake_data_hists(
     fd_Bs = get_hist1d(
         data=reco_df[var.var_evt_reco_col], bins=var.bins, weights=bg_weights,
     )
+
+    if (side_df is None) != (ccbc_cov is None):
+        warnings.warn(
+            "CCBC constraint requires both side_df and ccbc_cov; "
+            "only one was provided — falling back to CV background subtraction.",
+            stacklevel=2,
+        )
 
     if side_df is not None and ccbc_cov is not None:
         from .ccbc import get_constrained_background
