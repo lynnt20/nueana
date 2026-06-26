@@ -73,6 +73,28 @@ def _clipped_minor_locator(xmin, xmax):
             return locs[(locs >= xmin) & (locs <= xmax)]
     return _L()
 
+
+def _draw_step_band(
+    ax: plt.Axes,
+    bins: np.ndarray,
+    frac_err: np.ndarray,
+    *,
+    center: float = 1.0,
+    label: str | None = None,
+    **kwargs,
+) -> None:
+    """Fill a symmetric ±frac_err band around center with step="pre" rendering.
+
+    Prepends frac_err[0] so the band aligns with the leftmost bin edge. center
+    may be a scalar (e.g. 1.0 for ratio panels) or an array of length len(bins)
+    (e.g. steps[-1] for absolute error bands in main panels). All kwargs are
+    forwarded to ax.fill_between.
+    """
+    err = np.append(frac_err[0], frac_err)
+    kwargs.setdefault("step", "pre")
+    ax.fill_between(bins, center - err, center + err, label=label, **kwargs)
+
+
 def annotate_sbnd(ax, internal=True):
     """Stamp a status label in the upper-left and the tune label in the upper-right of *ax*.
 
@@ -467,26 +489,20 @@ def plot_var(indf: pd.DataFrame,
                          "zorder": ncategories + 1}
 
         has_systs = np.any(systs_arr > 0)
-        # fill_between needs the first bin edge repeated
-        _systs = np.append(systs_err[0], systs_err)
-        _stats = np.append(stats_err[0], stats_err)
 
         if has_systs:
             # Always combine stat and syst in quadrature into a single band.
             # When MCstat is folded into the covariance (SystematicsInput/Output),
             # stats_err is zero so combined reduces to systs_err unchanged.
             combined_err = np.sqrt(systs_err**2 + stats_err**2)
-            _combined = np.append(combined_err[0], combined_err)
             _band_label = ("MC stat.+syst.\n(GENIE+Flux+G4)"
                            if _syst_source == 'reweight_only' else "MC stat.+syst.")
-            ax.fill_between(bins,
-                            steps[-1] - _combined, steps[-1] + _combined,
-                            **systs_options, label=_band_label)
+            _draw_step_band(ax, bins, combined_err, center=steps[-1],
+                            label=_band_label, **systs_options)
         else:
             # systs=None — stat error only.
-            ax.fill_between(bins,
-                            steps[-1] - _stats, steps[-1] + _stats,
-                            **stats_options, label="MC stat.")
+            _draw_step_band(ax, bins, stats_err, center=steps[-1],
+                            label="MC stat.", **stats_options)
 
     cut_line_zorder = ncategories + 2
     if cut_val != None:
@@ -678,18 +694,15 @@ def plot_mc_data(mc_df: pd.DataFrame,
         # Use 0 for zero-MC bins: NaN here causes fill_between(step="pre") to
         # offset the entire band one bin to the right for all subsequent bins.
         mc_contribution = np.where(mc_tot > 0, mc_err / mc_tot, 0.0)
-        # shading is around unity
-        ps_err = 1 + np.append(mc_contribution[0],mc_contribution)
-        ms_err = 1 - np.append(mc_contribution[0],mc_contribution)
 
     nbins = len(bins)-1
     mc_total_cov = mc_dict.get('__total_cov__') if isinstance(mc_dict, dict) else None
-        
+
     bin_centers = 0.5 * (mc_bins[1:] + mc_bins[:-1])
-    
+
     ax_sub.errorbar(bin_centers, ratio, yerr=ratio_err, fmt='s', markersize=3,color='black', zorder=1e3, label='Data/Pred ratio')
-    # fill_between needs last entry to be repeated 
-    ax_sub.fill_between(mc_bins,ms_err, ps_err, step="pre", color=mpl.colors.to_rgba("gray", alpha=0.4), lw=0.0, label='Pred err.')
+    _draw_step_band(ax_sub, mc_bins, mc_contribution,
+                     color=mpl.colors.to_rgba("gray", alpha=0.4), lw=0.0, label='Pred err.')
     
     ax_sub.axhline(1, color='red', linestyle='--', linewidth=1, zorder=0,label="y=1.0")
     ax_sub.set_xlim(xmin, xmax)
