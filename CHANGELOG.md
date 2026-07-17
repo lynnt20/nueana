@@ -5,6 +5,73 @@ top each time changes are merged that other users should know about.
 
 ---
 
+## 2026-07-17 — Random background FDT ensemble, CCBC data-stat softening, off-beam uncertainty
+
+### New features
+
+**`fdt.py` — `run_random_background_fdt()` and `plot_random_background_fdt()`**
+
+Runs an ensemble of fake-data trials where per-category background weights are scaled
+by independent random factors (uniform in a configurable range). Each trial computes
+constrained (CCBC) and unconstrained unfolded cross-sections along with χ²/p-values.
+Returns a DataFrame with per-trial p-values, integrated cross-sections, and per-bin
+unfolded spectra. `plot_random_background_fdt` produces a summary figure: a p-value
+histogram, an integrated σ histogram, and optionally per-bin spectrum panels showing
+the 16th–84th percentile band across trials.
+
+```python
+result_df = nue.run_random_background_fdt(
+    reco_df, true_df, side_df,
+    ccbc_cov=ccbc_cov,
+    var=var_energy,
+    unf_input=uinp_energy,
+    wienersvd_fn=WienerSVD,
+    mask_fns=[nc_mask, nue_mask],
+    n_trials=500,
+)
+fig, axes = nue.plot_random_background_fdt(result_df, var=var_energy)
+```
+
+**`fdt.py` — `UnfoldInput.integrate()`**
+
+Collapses a multi-bin `UnfoldInput` to a single-bin (integrated) system for computing
+the total cross-section with the same WienerSVD pipeline used for the differential
+measurement. The 1×1 response is the total signal efficiency; per-key covariances are
+collapsed as `1ᵀ C 1`.
+
+```python
+uinp_1bin = uinp_energy.integrate()
+res_1bin  = uinp_1bin.unfold(WienerSVD, measure=np.array([total_meas]), total_cov=cov_1bin)
+```
+
+**`ccbc.py` — data-stat stored in `get_ccbc_cov` output; separated in `plot_ccbc_fd_comparison`**
+
+`get_ccbc_cov` now stores `data_stat_ns` and `data_stat_nc` in its returned dict.
+`plot_ccbc_fd_comparison` strips the data-stat contribution from the syst band
+(so the band shows MC-syst only) and puts Poisson error bars on the data points
+instead, preventing double-counting when data stat is included in the covariance.
+
+**`funcs.py` — off-beam statistical uncertainty added to `get_total_cov`**
+
+The off-beam (cosmic) statistical contribution is now included as a named
+uncertainty in `get_total_cov`. `add_uncertainty` has been extended to support
+a `target` parameter for directing contributions to the rate, xsec, or both
+covariance matrices.
+
+**`analysis.py` / `plotting.py` — DetVar subcategory breakdown**
+
+`plot_syst_breakdown` gains a `show_subcategories` flag to drill into DetVar
+sub-groups. `analysis.py` exports `detvar_subcategory_style`, a dict of
+colors and labels for the standard detector-variation subcategories.
+
+### Bug fixes
+
+- **`funcs.py`** — `get_intime_cov` fixed
+- **`plotting.py`** — `== None` / `!= None` replaced with `is None` / `is not None`; missing closing paren in counts label; universe column detection robustified for non-tuple column names; spurious `fig.canvas.draw()` call removed from `plot_mc_data`
+- **`analysis.py`** / **`syst.py`** — `bin_labels` typo fixed; DetVar subcategory keyword matching expanded
+
+---
+
 ## 2026-06-23 — Switch internal histogram units to absolute events at mcbnb_pot [BREAKING]
 
 ### Breaking change
