@@ -407,6 +407,9 @@ def get_ccbc_cov(
         "nc_output":             nc_output,
         "pinv_nc_nc":            pinv_nc,
         "pot_scale":             pot_scale,
+        # Stored so plot_ccbc_fd_comparison can separate data stat from syst band.
+        "data_stat_ns":          data_stat_ns,
+        "data_stat_nc":          data_stat_nc,
     }
 
 
@@ -869,8 +872,23 @@ def plot_ccbc_fd_comparison(
 
     cov_pre  = np.asarray(ccbc_cov["cov_ns_ns"])
     cov_post = np.asarray(ccbc_cov["cov_ms_ms"])
-    err_pre  = np.sqrt(np.diag(cov_pre))
-    err_post = np.sqrt(np.diag(cov_post))
+
+    # If data_stat_ns was passed to get_ccbc_cov it is baked into cov_ns_ns /
+    # cov_ms_ms.  Strip it out so the band shows MC syst only and the data
+    # points carry the Poisson error bars instead.
+    _data_stat = ccbc_cov.get("data_stat_ns")
+    if _data_stat is not None:
+        _data_stat = np.asarray(_data_stat)
+        cov_pre_syst  = cov_pre  - _data_stat
+        cov_post_syst = cov_post - _data_stat
+        data_err = np.sqrt(np.diag(_data_stat))
+    else:
+        cov_pre_syst  = cov_pre
+        cov_post_syst = cov_post
+        data_err = None
+
+    err_pre  = np.sqrt(np.diag(cov_pre_syst))
+    err_post = np.sqrt(np.diag(cov_post_syst))
 
     chisq_pre  = chi_squared(fd_ns_hist - ns_hist,        cov_pre)
     chisq_post = chi_squared(fd_ns_hist - constrained_ns, cov_post)
@@ -898,11 +916,12 @@ def plot_ccbc_fd_comparison(
         p["ax"].stairs(p["pred"], bins, color=p["color"], lw=1.5, label=p["label"])
         p["ax"].fill_between(
             bins, _repeat(p["pred"] - p["err"]), _repeat(p["pred"] + p["err"]),
-            step="pre", color=p["color"], alpha=0.25, label=r"MC stat.+syst.",
+            step="pre", color=p["color"], alpha=0.25,
+            label=r"MC stat.+syst.",
         )
         p["ax"].stairs(p["Bs_pred"], bins, color=p["color"],  lw=1.2, ls="-.", label=p["Bs_label"])
         p["ax"].stairs(fd_Bs_hist,   bins, color="gray",      lw=1.2, ls="--", label=r"true $B_S$")
-        p["ax"].errorbar(centers, fd_ns_hist, fmt="ko", ms=5, label=r"$D_S$")
+        p["ax"].errorbar(centers, fd_ns_hist, yerr=data_err, fmt="ko", ms=5, label=r"$D_S$")
         p["ax"].set_xlabel(var_config.var_labels[1])
         p["ax"].set_xticks(bins)
         p["ax"].set_xticklabels(var_config.bin_labels)
