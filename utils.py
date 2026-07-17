@@ -7,20 +7,20 @@ from pyanalib.pandas_helpers import *
 
 from . import config
 
-__all__ = ['ensure_lexsorted', 'merge_hdr', 'apply_event_mask', 'digitize_with_overflow', 'get_hist1d', 'get_hist2d', 'flux_pot_weights']
+__all__ = ['ensure_lexsorted', 'merge_hdr', 'apply_event_mask', 'digitize_with_overflow', 'get_hist1d', 'get_hist2d', 'bin_geometry']
 
 def ensure_lexsorted(frame, axis):
     """Ensure DataFrame axes are fully lexsorted when using MultiIndex.
-    
+
     This avoids pandas PerformanceWarning about indexing past lexsort depth.
-    
+
     Parameters
     ----------
     frame : pandas.DataFrame
         DataFrame to check and sort if needed.
     axis : int
         Axis to check (0 for index, 1 for columns).
-    
+
     Returns
     -------
     pandas.DataFrame
@@ -72,7 +72,7 @@ def merge_hdr(hdr_df, df):
 
 def apply_event_mask(df: pd.DataFrame, event_mask: str | None = None) -> pd.DataFrame:
     """ Apply event mask filter to DataFrame.
-    
+
     Parameters
     ----------
     df : pd.DataFrame
@@ -80,7 +80,7 @@ def apply_event_mask(df: pd.DataFrame, event_mask: str | None = None) -> pd.Data
     event_mask : str or None
         Event classification filter: 'all', 'signal', or 'background'.
         If None (default), returns all events.
-        
+
     Returns
     -------
     pd.DataFrame
@@ -88,7 +88,7 @@ def apply_event_mask(df: pd.DataFrame, event_mask: str | None = None) -> pd.Data
         - 'signal': events where signal == 0
         - 'background': events where signal != 0
         - 'all' or None: all events
-        
+
     Raises
     ------
     ValueError
@@ -98,8 +98,10 @@ def apply_event_mask(df: pd.DataFrame, event_mask: str | None = None) -> pd.Data
     if event_mask is None:
         event_mask = "all"
     if event_mask not in {"all", "signal", "background"}:
-        raise ValueError("event_mask must be one of: 'all', 'signal', 'background', or None")
-    
+        raise ValueError(
+            f"event_mask={event_mask!r} is not valid. Choose from: 'all', 'signal', 'background', or None"
+        )
+
     # Apply: filter based on signal column (0 = signal, nonzero = background)
     if event_mask == "signal":
         return df[df.signal == 0]
@@ -137,24 +139,6 @@ def digitize_with_overflow(data, bins):
     return np.clip(np.searchsorted(bins, np.clip(a, bins[0], bins[-1]-1e-10), side='right') - 1,
                    0, n_bins - 1)
 
-
-def flux_pot_weights(df: pd.DataFrame, mcbnb_pot: float, integrated_flux: float) -> np.ndarray:
-    """Return flux+POT normalized per-event weights from ``weights_mc``.
-
-    Equivalent to the per-row formula::
-
-        flux_pot_norm = weights_mc / (integrated_flux * mcbnb_pot / 1e6)
-
-    Parameters
-    ----------
-    df : pandas.DataFrame
-        DataFrame carrying a ``weights_mc`` column.
-    mcbnb_pot : float
-        Reference BNB POT for the sample.
-    integrated_flux : float
-        Integrated nue flux in cm⁻² (from :data:`nueana.analysis.integrated_flux`).
-    """
-    return df.weights_mc.values / (integrated_flux * (mcbnb_pot / 1e6))
 
 
 def get_hist1d(weights=None, data=None, bins=None, overflow=True, **kwargs):
@@ -228,3 +212,15 @@ def get_hist2d(weights=None, x=None, y=None, bins=None, overflow=True, **kwargs)
         return np.bincount(flat, weights=weights, minlength=n_x * n_y).reshape(n_x, n_y).astype(float)
     else:
         return np.histogram2d(x, y, bins=[x_bins, y_bins], weights=weights, **kwargs)[0]
+
+
+def bin_geometry(var) -> tuple[np.ndarray, np.ndarray]:
+    """Return (bin_centers, bin_widths) for a VariableConfig.
+
+    Centers are ``var.bin_centers``; widths are ``np.diff(var.bin_labels)``,
+    which can differ from ``np.diff(var.bins)`` when an overflow display label
+    is placed past the physical bin edge.
+    """
+    centers = np.asarray(var.bin_centers)
+    widths  = np.diff(np.asarray(var.bin_labels, dtype=float))
+    return centers, widths

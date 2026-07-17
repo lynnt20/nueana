@@ -63,10 +63,16 @@ class VariableConfig:
         self.var_save_name = var_save_name
         self.var_plot_name = var_plot_name
         self.var_unit = var_unit
+        # var_plot_name is the math content; we accept it with or without outer
+        # $...$ (stripping if present so nested-dollar parsing doesn't break).
+        # var_unit is bare (e.g. "GeV", not "(GeV)"); brackets are added here.
+        # Variable, superscript, AND unit all live inside one \mathrm{...} so
+        # everything renders upright (units in italic math is wrong typography).
+        plot_math   = var_plot_name.strip("$")
         unit_suffix = f"~[{var_unit}]" if len(var_unit) > 0 else ""
-        self.var_labels = [r"$\mathrm{" + var_plot_name + unit_suffix + "}$",
-                           r"$\mathrm{" + var_plot_name + "^{reco.}" + unit_suffix + "}$",
-                           r"$\mathrm{" + var_plot_name + "^{true}" + unit_suffix + "}$"]
+        self.var_labels = [r"$\mathrm{" + plot_math + unit_suffix + "}$",
+                           r"$\mathrm{" + plot_math + "^{reco.}" + unit_suffix + "}$",
+                           r"$\mathrm{" + plot_math + "^{true}"  + unit_suffix + "}$"]
         self.bins = bins
         self.bin_centers = (bins[:-1] + bins[1:]) / 2.
         self.bin_labels = bin_labels
@@ -99,6 +105,9 @@ class XSecInputs:
 class SystematicsOutput:
     """
     Results of a systematics evaluation for a single variable.
+
+    All histograms and covariances are in **absolute event-count units at
+    mcbnb_pot** (i.e. ``weights_mc`` summed directly, no flux division).
     xsec_* fields are optional; check .has_xsec before accessing them.
     """
 
@@ -203,6 +212,7 @@ class PlottingConfig:
     legend_kwargs: dict | None = None
     ratio_min: float = 0.0
     ratio_max: float = 2.0
+    ylim_scale: float = 1.5
     data_first: bool = True
     internal: bool = True
     categories: dict | None = None

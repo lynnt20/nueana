@@ -10,6 +10,7 @@ Functions that support disabling this accept a `scale=True` parameter.
 """
 from __future__ import annotations
 
+import hashlib
 import numpy as np
 import pandas as pd
 import warnings
@@ -18,6 +19,8 @@ from tqdm import tqdm
 __all__ = [
     'is_xsec',
     'calc_matrices',
+    'decompose_cov',
+    'key_in_allowed',
     'get_xsec_hists',
     'get_syst_hists',
     'get_syst',
@@ -30,8 +33,7 @@ __all__ = [
 from .utils import ensure_lexsorted, apply_event_mask
 from .utils import get_hist1d, get_hist2d, digitize_with_overflow
 from .selection import select
-from .analysis import define_signal, integrated_flux
-from .utils import flux_pot_weights
+from .analysis import define_signal
 from .classes import XSecInputs
 from makedf.geniesyst import regen_systematics, ar23p_genie_systematics
     
@@ -100,9 +102,51 @@ def calc_matrices(var_arr: np.ndarray, cv: np.ndarray) -> tuple[np.ndarray, np.n
         corr = cov / np.sqrt(np.outer(np.diag(cov),np.diag(cov)))
     return cov, cov_frac, corr
 
-def _get_xsec_hists_inner(smear_flat_idx, w_sig, truth_sig_idx, true_signal_weights,
-                           sig_hist_cv, bkg_reco_idx, w_bkg, n_bins,
-                           return_response=False):
+def decompose_cov(C: np.ndarray, h: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Decompose a covariance matrix into normalization and shape components.
+
+    The normalization component is the fully-correlated outer-product piece that
+    scales all bins proportionally. The shape component is the remainder, and
+    by construction has zero net normalization (``C_shape.sum() == 0``).
+
+    Parameters
+    ----------
+    C : np.ndarray, shape (n, n)
+        Covariance matrix containing both normalization and shape contributions.
+    h : np.ndarray, shape (n,)
+        Nominal histogram (central-value bin counts) used to define the
+        normalization direction.
+
+    Returns
+    -------
+    C_norm : np.ndarray, shape (n, n)
+        Normalization covariance: ``outer(h, h) * sum(C) / sum(h)**2``.
+    C_shape : np.ndarray, shape (n, n)
+        Shape covariance: ``C - C_norm``.
+
+    Notes
+    -----
+    ``C_shape`` can have small negative eigenvalues near zero from floating-point
+    subtraction. This is expected and harmless for error-band plotting; use a
+    pseudoinverse if you need to invert ``C_shape`` (e.g. for a chi-square).
+    """
+    N = float(h.sum())
+    C_norm  = np.outer(h, h) * float(C.sum()) / N**2
+    C_shape = C - C_norm
+    return C_norm, C_shape
+
+
+def _get_xsec_hists_inner(
+    smear_flat_idx: np.ndarray,
+    w_sig: np.ndarray,
+    truth_sig_idx: np.ndarray,
+    true_signal_weights: np.ndarray,
+    sig_hist_cv: np.ndarray,
+    bkg_reco_idx: np.ndarray,
+    w_bkg: np.ndarray,
+    n_bins: int,
+    return_response: bool = False,
+) -> np.ndarray | tuple[np.ndarray, np.ndarray]:
     """Core xsec histogram computation using pre-digitized indices.
 
     Called by :func:`get_xsec_hists` (single call) and by
@@ -259,9 +303,7 @@ def get_syst_hists(reco_df: pd.DataFrame,
                     break
             break
 
-    if scale and mcbnb_pot is not None:
-        scaling = flux_pot_weights(reco_df, mcbnb_pot, integrated_flux)
-    elif 'weights_mc' in reco_df.columns.get_level_values(0):
+    if scale and 'weights_mc' in reco_df.columns.get_level_values(0):
         scaling = reco_df.weights_mc.values.ravel()
     else:
         scaling = np.ones(reco_df.shape[0])
@@ -532,7 +574,7 @@ def get_detvar_systs(detvar_dict, var, bins,
         this_dict = detvar_dict[key]
         this_dv   = this_dict['dv_df']
         this_cv   = this_dict['cv_df']
-        this_norm = integrated_flux * (this_dict['pot'] / 1e6)
+        this_norm = this_dict['pot']
 
         def _ensure_signal(df):
             """Add the signal column via define_signal if it is missing."""
@@ -578,10 +620,10 @@ _DETVAR_SUBCATEGORIES: list[tuple[str, list[str]]] = [
     ("WireMod",     ["wiremod"]),
     ("SCE",         ["sce"]),
     ("PMT",         ["pmt"]),
-    ("calorimetry", ["ccal", "phi", "alpha", "beta90", "beta_90", "betap90","Ecorr",'yz']),
+    ("calorimetry", ["ccal", "phi", "alpha", "beta90", "beta_90", "betap90","Ecorr",'yz','calo']),
 ]
 
-_CATEGORY_KEYWORDS = ["GENIE", "Flux", "MCstat", "DetVar", "Geant4"]
+_CATEGORY_KEYWORDS = ["GENIE", "Flux", "MCstat", "DetVar", "Geant4","Cosmic",'NTargets','BeamExposure']
 
 
 def _extract_genie_key(key: str) -> str:
@@ -634,12 +676,33 @@ def _classify_category(key: str) -> str | None:
     return next((cat for cat in _CATEGORY_KEYWORDS if cat in key), None)
 
 
+def key_in_allowed(key: str, allowed_keys) -> bool:
+    """Return True if a systematic key's category appears in allowed_keys.
+
+    Parameters
+    ----------
+    key : str
+        Raw systematic key string (as it appears in syst_dict).
+    allowed_keys : sequence of str or None
+        Category names to include (e.g. ``('GENIE', 'MCstat')``).
+        GENIE aliases (SBNNuSyst, SuSAv2) are handled correctly.
+        None means all keys are allowed.
+
+    Returns
+    -------
+    bool
+    """
+    if allowed_keys is None:
+        return True
+    return _classify_category(key) in allowed_keys
+
+
 def _classify_detvar_subcategory(detvar_key: str) -> str:
     """Map a detector variation key to its analysis subcategory."""
     key    = detvar_key.lower()
     tokens = key.replace("-", "_").split("_")
     for subcategory, keywords in _DETVAR_SUBCATEGORIES:
-        if any(kw in key for kw in keywords):
+        if any(kw.lower() in key for kw in keywords):
             return subcategory
     if "r" in tokens:
         return "calorimetry"
@@ -668,14 +731,14 @@ def get_syst_df(dicts: list, cv_hist: np.ndarray) -> pd.DataFrame:
     """
     records = []
 
-    N_tot = float(np.sum(cv_hist))
+    N_tot  = float(np.sum(cv_hist))
     for d in dicts:
         for raw_key in d:
-            cov = d[raw_key]['cov']
+            cov      = d[raw_key]['cov']
             unc_diag = np.sqrt(np.diag(cov)) / cv_hist
-            cov_sum = np.sum(cov)
+
+            cov_sum = float(np.sum(cov))
             if cov_sum < 0:
-                print(f"Note: sum of covariance matrix for '{raw_key}' is {cov_sum:.3e} (floating-point noise near zero); clamping to 0.")
                 cov_sum = 0.0
             unc_norm = float(np.sqrt(cov_sum) / N_tot) if N_tot > 0 else 0.0
 
@@ -747,10 +810,15 @@ def make_multiverse_weights(evtdf, knob_list, n_univs=100, evt_prefix=None, nudf
         raise ValueError("Index names of nudf and evtdf must match.")
 
     def _draws(knob, df_idx):
-        """Return (n_univs,) array of per-universe Gaussian draws with reproducible seeds."""
+        """Return (n_univs,) array of per-universe Gaussian draws with reproducible seeds.
+
+        Uses hashlib (not Python's hash()) so seeds are identical across processes
+        regardless of PYTHONHASHSEED — required for cross-notebook synchronization.
+        """
         out = np.empty(n_univs)
         for i in range(n_univs):
-            np.random.seed(hash(knob + str(i) + str(df_idx)) % 2**32)
+            digest = hashlib.md5(f"{knob}{i}{df_idx}".encode()).hexdigest()
+            np.random.seed(int(digest, 16) % 2**32)
             out[i] = np.random.normal(0, 1)
         return out
 

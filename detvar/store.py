@@ -53,7 +53,7 @@ import pandas as pd
 from collections import namedtuple
 from ..io import load_dfs
 
-__all__ = ['DetVarFile', 'prepare_detvar_df', 'write_detvar_store', 'load_detvar_dict', 'detvar_store_info', 'apply_selection']
+__all__ = ['DetVarFile', 'prepare_detvar_df', 'write_detvar_store', 'load_detvar_dict', 'select_detvar_dict', 'subsample_detvar_dict', 'detvar_store_info', 'apply_selection']
 
 _DEFAULT_EXT_MATCH_COL = ['run', 'subrun', 'evt', 'E']
 _DEFAULT_INT_MATCH_COL = ['__ntuple', 'entry', 'file_idx']
@@ -448,6 +448,147 @@ def load_detvar_dict(
 # ---------------------------------------------------------------------------
 # Inspection
 # ---------------------------------------------------------------------------
+
+def select_detvar_dict(detvar_dict: dict, cuts, in_place: bool = True) -> dict:
+    """Apply a cut sequence to every CV/DV frame in a loaded detvar dict.
+
+    Use this to shrink an already-loaded ``detvar_dict`` (the output of
+    :func:`load_detvar_dict`) so that subsequent ``get_total_cov(cuts=...)``
+    calls do not re-run :func:`~nueana.selection.select` on the full-size
+    frames. Useful when iterating on plots at a looser preselection.
+
+    Parameters
+    ----------
+    detvar_dict : dict
+        Output of :func:`load_detvar_dict` — maps group name to
+        ``{'cv_df', 'dv_df', 'pot'}``. ``dv_df`` may be a DataFrame or a list
+        of DataFrames (multisim).
+    cuts : list of CutSpec
+        Cut sequence forwarded to :func:`~nueana.selection.select`.
+    in_place : bool, default True
+        If True, mutate the input dict and return it; if False, return a new
+        dict with shallow-copied entries and replaced frames.
+
+    Returns
+    -------
+    dict
+        ``detvar_dict`` with each ``cv_df`` / ``dv_df`` replaced by its
+        selected version.
+    """
+    from ..selection import select
+
+    out = detvar_dict if in_place else {}
+    for key, entry in detvar_dict.items():
+        cv = select(entry['cv_df'], cuts=cuts, check_preprocessed=False)
+        dv = entry['dv_df']
+        if isinstance(dv, list):
+            dv = [select(d, cuts=cuts, check_preprocessed=False) for d in dv]
+        else:
+            dv = select(dv, cuts=cuts, check_preprocessed=False)
+        if in_place:
+            entry['cv_df'] = cv
+            entry['dv_df'] = dv
+        else:
+            out[key] = {**entry, 'cv_df': cv, 'dv_df': dv}
+    return out
+
+
+def _event_key_series(df: pd.DataFrame) -> pd.Series:
+    """Return a per-row ``(run, subrun, evt)`` event identifier as a Series of tuples.
+
+    The CV/DV slc frames are stored with ``run``, ``subrun``, ``evt`` columns
+    added by :func:`_add_rse_cols` regardless of MultiIndex depth, so they are
+    addressable by top-level name.
+    """
+    def _top(df, name):
+        col = df[name]
+        return col.iloc[:, 0] if isinstance(col, pd.DataFrame) else col
+
+    run    = _top(df, 'run').to_numpy()
+    subrun = _top(df, 'subrun').to_numpy()
+    evt    = _top(df, 'evt').to_numpy()
+    return pd.Series(list(zip(run, subrun, evt)), index=df.index)
+
+
+def subsample_detvar_dict(detvar_dict: dict, frac: float, seed: int | None = None,
+                          in_place: bool = True) -> dict:
+    """Randomly subsample CV/DV frames at the event level and rescale POT.
+
+    Selects a random fraction of ``(run, subrun, evt)`` tuples shared by CV and
+    every DV in the group, then keeps every slice belonging to those events on
+    both sides. CV and DV slice rows are not 1-to-1 aligned (detector variations
+    can produce a different number of reco slices per event), so subsampling
+    must be done by event identifier rather than by row position — this is the
+    same notion of "same events" used at write time (see
+    :func:`write_detvar_store`, which intersects via the nulite event index).
+
+    ``pot`` is multiplied by ``frac`` so the predicted rate is preserved in
+    expectation; only the per-bin statistical noise on the detvar covariance
+    grows (as ~1/sqrt(frac)).
+
+    Use during memory-constrained iteration when detvar statistical noise is
+    not the limiting uncertainty.
+
+    Parameters
+    ----------
+    detvar_dict : dict
+        Output of :func:`load_detvar_dict` — maps group name to
+        ``{'cv_df', 'dv_df', 'pot'}``. Frames must still carry
+        ``run``/``subrun``/``evt`` columns (call this *before* any column
+        trimming or aggregation that would drop them).
+    frac : float
+        Fraction of events to keep, in (0, 1].
+    seed : int, optional
+        Seed for reproducibility.
+    in_place : bool, default True
+        If True, mutate the input dict and return it; otherwise return a new dict.
+
+    Returns
+    -------
+    dict
+        ``detvar_dict`` with each ``cv_df`` / ``dv_df`` restricted to slices
+        from the sampled events and ``pot`` rescaled by ``frac``.
+    """
+    if not 0 < frac <= 1:
+        raise ValueError(f"frac must be in (0, 1], got {frac}")
+
+    rng = np.random.default_rng(seed)
+    out = detvar_dict if in_place else {}
+
+    for key, entry in detvar_dict.items():
+        cv      = entry['cv_df']
+        dv      = entry['dv_df']
+        dv_list = dv if isinstance(dv, list) else [dv]
+
+        # Build per-frame event-id series; intersect with DV(s) to get the
+        # event pool actually shared on both sides (write_detvar_store
+        # already enforces this, but we re-check defensively).
+        cv_evts = _event_key_series(cv)
+        common  = set(cv_evts.unique())
+        for d in dv_list:
+            common &= set(_event_key_series(d).unique())
+        common_list = sorted(common)
+
+        n_keep = int(round(frac * len(common_list)))
+        if n_keep == 0 and len(common_list) > 0:
+            n_keep = 1  # never empty out a group on purpose
+        idx     = rng.choice(len(common_list), size=n_keep, replace=False)
+        sampled = {common_list[i] for i in idx}
+
+        cv_sub      = cv[cv_evts.isin(sampled)]
+        dv_sub_list = [d[_event_key_series(d).isin(sampled)] for d in dv_list]
+        new_dv      = dv_sub_list if isinstance(dv, list) else dv_sub_list[0]
+        new_pot     = entry['pot'] * frac
+
+        if in_place:
+            entry['cv_df'] = cv_sub
+            entry['dv_df'] = new_dv
+            entry['pot']   = new_pot
+        else:
+            out[key] = {**entry, 'cv_df': cv_sub, 'dv_df': new_dv, 'pot': new_pot}
+
+    return out
+
 
 def detvar_store_info(h5file: str) -> pd.DataFrame:
     """Return the metadata table from a DetVar store.

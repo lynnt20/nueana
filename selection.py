@@ -33,8 +33,11 @@ The analysis-specific cut sequences (:data:`~nueana.analysis.DEFAULT_CUTS`,
                       fn=partial(cut_muon_rejection, max_track_length=100))
 """
 
+from __future__ import annotations
+
 import warnings
 
+import pandas as pd
 from dataclasses import replace
 from functools import reduce
 
@@ -116,11 +119,13 @@ def modify_cut(cuts, name, **kwargs):
 # Selection pipeline
 # ---------------------------------------------------------------------------
 
-def select(indf,
-           cuts=None,
-           stage=None,
-           savedict=False,
-           check_preprocessed=True):
+def select(
+    indf: pd.DataFrame,
+    cuts: list[CutSpec] | None = None,
+    stage: str | None = None,
+    savedict: bool = False,
+    check_preprocessed: bool = True,
+) -> pd.DataFrame | dict:
     """Apply a sequence of cuts to a DataFrame.
 
     Parameters

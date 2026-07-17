@@ -57,7 +57,7 @@ __all__ = [
     'generic_categories', 'generic_dict',
     'pdg_categories', 'pdg_dict',
     'mode_categories', 'mode_dict',
-    'category_dict_signal', 'category_dict_control',
+    'category_dict_signal', 'category_dict_control', 'detvar_subcat_dict',
     # flux and normalisation
     'nue_flux', 'flux_vals', 'integrated_flux',
     'POT_NORM_UNC', 'NTARGETS_UNC',
@@ -76,12 +76,16 @@ __all__ = [
 # Physical and detector constants
 # ---------------------------------------------------------------------------
 
-RHO = 1.3836        # g/cm3, liquid Ar density
+RHO = 1.38434        # g/cm3, liquid Ar density
 N_A = 6.02214076e23 # Avogadro's number
 M_AR = 40           # g, molar mass of argon
-# x cm (drift) * z cm (width) * y cm (height), excluding 90 cm of y-dimension at high z
-V_SBND = (190)*2 * ((250 - 10)*(190*2) + (450-250)*(100 + 190))
-NTARGETS = RHO * V_SBND * N_A / M_AR
+# FV_split_truncY_eastonly: 5 < |x| < 190, |y| < 190, 10 < z < 250 (both TPCs)
+# + East (x<0): -190 < y < 100, 250 < z < 450
+# + West (x>0):  |y| < 190,     250 < z < 450
+V_SBND = (2 * 185 * 380 * 240   # both TPCs, low z
+         + 185 * 290 * 200       # East TPC, high z, truncated y
+         + 185 * 380 * 200)      # West TPC, high z, full y
+NTARGETS = RHO * V_SBND * N_A                   # number of nucleons (nucleon molar mass ≈ 1 g/mol)
 
 
 # ---------------------------------------------------------------------------
@@ -177,17 +181,28 @@ category_dict_control = {
     'Datastat':     {'color': 'gray',            'label': 'Data statistics\n[proj. 1e20 POT]', 'line': '--'},
 }
 
+# Subcategory breakdown dict for DetVar — use with plot_syst_breakdown(..., show_subcategories=True).
+# Keys match the subcategory labels assigned by syst._classify_detvar_subcategory.
+# The 'DetVar' entry styles the combined total line; subcategory entries use dashed lines.
+detvar_subcat_dict = {
+    'PMT':         {'color': 'goldenrod',     'label': 'PMT',         'line': '--'},
+    'SCE':         {'color': 'tomato',        'label': 'SCE',         'line': '--'},
+    'WireMod':     {'color': 'cornflowerblue','label': 'WireMod',     'line': '--'},
+    'calorimetry': {'color': 'darkred',       'label': 'calorimetry', 'line': '--'},
+    'DetVar':      {'color': 'orange',        'label': 'DetVar',      'line': '-'},
+}
+
 
 # ---------------------------------------------------------------------------
 # Flux and normalisation constants
 # ---------------------------------------------------------------------------
 
-# flux file, units: /m^2/10^6 POT, 50 MeV bins
-with uproot.open(config.FLUX_FILE) as f:
-    nue_flux = f["flux_sbnd_nue"].to_numpy()
-    flux_vals = nue_flux[0]
-integrated_flux = flux_vals.sum() / 1e4               # convert to cm^-2
-integrated_flux *= (180*180) / (200*200)               # rescale front face to AV front face
+# flux file, units: cm^-2 POT^-1 per 50 MeV bin (volume-averaged, FV_split_truncY_eastonly)
+with uproot.open(config.FLUX_FILE_NEW) as f:
+    nue_flux  = f["flux_sbnd_nue"].to_numpy()
+    anue_flux = f["flux_sbnd_anue"].to_numpy()
+    flux_vals = nue_flux[0] + anue_flux[0]             # nue + nuebar
+integrated_flux = flux_vals.sum()                      # cm^-2 POT^-1
 
 POT_NORM_UNC  = 0.02  # fractional uncertainty on beam exposure (POT counting)
 NTARGETS_UNC  = 0.01  # fractional uncertainty on number of Ar targets
@@ -356,7 +371,7 @@ def electron_energy() -> VariableConfig:
         var_plot_name="$E_{e-}$",
         var_unit="GeV",
         bins=np.array([0.5, 0.7, 0.95, 1.25, 1.7, 2.5]),
-        bin_labels=np.array([0.5, 0.7, 0.95, 1.25, 1.7, 5]),
+        bin_labels=np.array([0.5, 0.7, 0.95, 1.25, 1.7, 2.5]),
         var_evt_reco_col=('primshw', 'shw', 'reco_energy'),
         var_evt_truth_col=('slc', 'truth', 'e', 'genE'),
         var_nu_col=('e', 'genE'),

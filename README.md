@@ -27,6 +27,8 @@ plotting, and uncertainty studies.
 - `syst.py`: Low-level systematics — universe histograms, covariance matrices, detector variations.
 - `utils.py`: DataFrame helpers for MultiIndex sorting, header merging, event masking, and histograms.
 - `io.py`: HDF5 dataframe loading — split-file primitives (`load_dfs`) and high-level loaders (`load_mc`, `load_data`).
+- `ccbc.py`: Cross-region Background Constraint (CCBC) — covariance propagation, constrained background estimation, and comparison plots.
+- `fdt.py`: Fake-data tests — `UnfoldInput` container, WienerSVD unfolding driver, and random-background ensemble (`run_random_background_fdt`).
 - `detvar/`: Detector variation (DetVar) subpackage. See [`detvar/README.md`](detvar/README.md).
 
 ## Quickstart for a new analysis
