@@ -287,7 +287,7 @@ def plot_var(indf: pd.DataFrame,
     elif categories_kwarg is not None: categories = categories_kwarg
     else:          categories = signal_categories
     ncategories = len(categories)
-    if hatch == None: hatch = [""]*ncategories
+    if hatch is None: hatch = [""]*ncategories
     alpha = 0.25 if pdg else 0.4
     
     hists       = np.zeros((ncategories,len(bins)-1)) # this is for storing the histograms
@@ -392,38 +392,42 @@ def plot_var(indf: pd.DataFrame,
     #   SystematicsOutput → use pre-computed get_total_cov result; MCstat folded in.
     #   True              → read universe columns from df; MCstat separate if no MCstat universe.
     #   None/else         → MC stat error only.
-    _mcstat_err_annot = None  # populated in SystematicsInput/Output blocks when MCstat key present
+    _mcstat_err_annot = None
     _syst_source = 'none'  # 'none' | 'reweight_only' | 'full' — tags scope of the syst band
 
     def _apply_syst_output(output, hist_scale):
         """Shared logic for SystematicsInput and SystematicsOutput paths."""
-        nonlocal _mcstat_err_annot
         _total_cov = np.array(output.rate_cov, dtype=float, copy=True) * hist_scale**2
         _systs_arr = np.sqrt(np.clip(np.diag(_total_cov), a_min=0.0, a_max=None))
         _syst_dict = dict(output.rate_syst_dict)
         _mcstat_key = next((k for k in _syst_dict if str(k).lower() == 'mcstat'), None)
         _calc_sep   = _mcstat_key is None
-        if _mcstat_key is not None:
-            _mcstat_err_annot = np.sqrt(np.diag(_syst_dict[_mcstat_key]['cov'] * hist_scale**2)) * scale
-        return _total_cov, _systs_arr, _syst_dict, _calc_sep
+        _mcstat_ann = (
+            np.sqrt(np.diag(_syst_dict[_mcstat_key]['cov'] * hist_scale**2)) * scale
+            if _mcstat_key is not None else None
+        )
+        return _total_cov, _systs_arr, _syst_dict, _calc_sep, _mcstat_ann
 
     if isinstance(systs, SystematicsInput) or type(systs).__name__ == 'SystematicsInput':
         # Case 1: call get_total_cov on-the-fly with the bundled parameters.
         from .funcs import get_total_cov
         _output = get_total_cov(reco_df=indf, reco_var=var, bins=bins, **systs.to_kwargs())
-        total_cov, systs_arr, syst_dict, calc_separate_mcstat = _apply_syst_output(_output, 1.0)
+        total_cov, systs_arr, syst_dict, calc_separate_mcstat, _mcstat_err_annot = _apply_syst_output(_output, 1.0)
         _syst_source = 'full'
 
     elif isinstance(systs, SystematicsOutput) or type(systs).__name__ == 'SystematicsOutput':
         # Case 2: caller already ran get_total_cov and passes the result directly.
         if systs.mcbnb_pot is None:
             raise ValueError("SystematicsOutput.mcbnb_pot is not set; use get_total_cov to produce it")
-        total_cov, systs_arr, syst_dict, calc_separate_mcstat = _apply_syst_output(systs, 1.0)
+        total_cov, systs_arr, syst_dict, calc_separate_mcstat, _mcstat_err_annot = _apply_syst_output(systs, 1.0)
         _syst_source = 'full'
 
     elif systs is True:
         # Case 3: inherit systematics from universe columns in the dataframe.
-        found_systs = any("univ_" in "_".join(list(col)) for col in indf.columns)
+        found_systs = any(
+            isinstance(col, tuple) and any("univ_" in str(c) for c in col)
+            for col in indf.columns
+        )
         if not found_systs:
             print("systs=True but no universe columns found; computing stat error only")
             syst_dict = {}
@@ -469,11 +473,11 @@ def plot_var(indf: pd.DataFrame,
         color      = entry["color"]
         plot_label = entry.get("label", key)
         if (mult_factor!= 1.0) & (i==0): plot_label +=  f" [x{mult_factor}]"
-        if counts: plot_label += f" ({int(hist_counts[i]):,})" if hist_counts[i] < 1e6 else f"({hist_counts[i]:.2e}"
+        if counts: plot_label += f" ({int(hist_counts[i]):,})" if hist_counts[i] < 1e6 else f"({hist_counts[i]:.2e})"
         if percents: plot_label += f" ({hist_counts[i]/np.sum(hist_counts)*100:.1f}%)"
         bottom=steps[i-1] if i>0 else 0
         # steps needs the first entry to be repeated!
-        steps[i] = np.insert(hists[i],obj=0,values=hists[i][0]) + bottom; 
+        steps[i] = np.insert(hists[i], obj=0, values=hists[i][0]) + bottom
         ax.fill_between(bins, bottom, steps[i], step="pre", 
                          facecolor=mpl.colors.to_rgba(color,alpha),
                          edgecolor=mpl.colors.to_rgba(color,1.0),  
@@ -505,7 +509,7 @@ def plot_var(indf: pd.DataFrame,
                             label="MC stat.", **stats_options)
 
     cut_line_zorder = ncategories + 2
-    if cut_val != None:
+    if cut_val is not None:
         for i in range(len(cut_val)):
             ax.axvline(cut_val[i],lw=2,color="gray",linestyle="--",zorder=cut_line_zorder)
     
@@ -682,7 +686,6 @@ def plot_mc_data(mc_df: pd.DataFrame,
     
     # plot the ratio
     mc_tot = mc_steps[-1][1:]  # last step contains the total MC counts
-    fig.canvas.draw()
 
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore",message="invalid value encountered in divide")
