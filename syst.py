@@ -35,7 +35,7 @@ from .utils import get_hist1d, get_hist2d, digitize_with_overflow
 from .selection import select
 from .analysis import define_signal
 from .classes import XSecInputs
-from makedf.geniesyst import regen_systematics, ar23p_genie_systematics
+from makedf.geniesyst import ar23_systematics, ar23p_systematics
     
 def is_xsec(col: tuple, xsec_inputs: XSecInputs | None) -> bool:
     """Check if event rate calculation should be used for cross-section systematics.
@@ -52,7 +52,7 @@ def is_xsec(col: tuple, xsec_inputs: XSecInputs | None) -> bool:
     Returns
     -------
     bool
-        True if the knob is in regen_systematics or ar23p_genie_systematics
+        True if the knob is in ar23_systematics or ar23p_systematics
         and all xsec inputs are provided; False otherwise.
     """
     return (
@@ -340,9 +340,17 @@ def get_syst_hists(reco_df: pd.DataFrame,
             np.ones(len(xsec_inputs.true_signal_df)) * xsec_inputs.true_signal_scale,
             xsec_inputs.true_signal_df[xsec_inputs.true_var_true], bins,
         )
+        # Single-bin (integrated) variants: fold every event into bin 0. Used to
+        # compute a normalization uncertainty that respects the response-matrix
+        # smearing, since sum-over-bins of the multi-bin xsec cov is not the
+        # same as the variance of the integrated response universes.
         _xsec = dict(sig_mask=_sig_mask, smear_flat_idx=_smear_flat_idx,
                      truth_sig_idx=_truth_sig_idx, bkg_reco_idx=_bkg_reco_idx,
-                     sig_hist_cv=_sig_hist_cv)
+                     sig_hist_cv=_sig_hist_cv,
+                     sb_smear_flat_idx=np.zeros(int(_sig_mask.sum()), dtype=np.int64),
+                     sb_truth_sig_idx=np.zeros(len(xsec_inputs.true_signal_df), dtype=np.int64),
+                     sb_bkg_reco_idx=np.zeros(int((~_sig_mask).sum()), dtype=np.int64),
+                     sb_sig_hist_cv=np.array([_sig_hist_cv.sum()]))
     
     # unisim
     if len(unisim_col)>0:
@@ -353,23 +361,30 @@ def get_syst_hists(reco_df: pd.DataFrame,
             weights *= scaling
 
             response = None
+            sb_hists = None
             if is_xsec(col, xsec_inputs):
                 true_signal_weights = xsec_inputs.true_signal_df[col[2:]].values.astype(np.float64) * xsec_inputs.true_signal_scale
+                tsw = true_signal_weights.reshape(-1, 1)
                 w_sig = weights[_xsec['sig_mask']].reshape(-1, 1)
                 w_bkg = weights[~_xsec['sig_mask']].reshape(-1, 1)
                 result = _get_xsec_hists_inner(
-                    _xsec['smear_flat_idx'], w_sig, _xsec['truth_sig_idx'],
-                    true_signal_weights.reshape(-1, 1),
+                    _xsec['smear_flat_idx'], w_sig, _xsec['truth_sig_idx'], tsw,
                     _xsec['sig_hist_cv'], _xsec['bkg_reco_idx'], w_bkg, n_out,
                     return_response=save_response,
                 )
                 hists, response = result if save_response else (result, None)
+                sb_hists = _get_xsec_hists_inner(
+                    _xsec['sb_smear_flat_idx'], w_sig, _xsec['sb_truth_sig_idx'], tsw,
+                    _xsec['sb_sig_hist_cv'], _xsec['sb_bkg_reco_idx'], w_bkg, 1,
+                )
             else:
                 hists = np.bincount(reco_idx, weights=weights, minlength=n_out).reshape(n_out, 1)
 
             entry = {'hists': hists}
             if response is not None:
                 entry['response'] = response
+            if sb_hists is not None:
+                entry['single_bin_hists'] = sb_hists
             syst_dict[col[2]] = entry
 
     # multisig (ps1/ms1 pairs)
@@ -385,6 +400,7 @@ def get_syst_hists(reco_df: pd.DataFrame,
             weights *= scaling[:, np.newaxis]
             
             response = None
+            sb_hists = None
             if is_xsec(col, xsec_inputs):
                 true_signal_ps1 = np.nan_to_num(xsec_inputs.true_signal_df[ps1_col[2:]].values.astype(np.float64), copy=False, nan=1.0)
                 true_signal_ms1 = np.nan_to_num(xsec_inputs.true_signal_df[ms1_col[2:]].values.astype(np.float64), copy=False, nan=1.0)
@@ -397,6 +413,10 @@ def get_syst_hists(reco_df: pd.DataFrame,
                     return_response=save_response,
                 )
                 hists, response = result if save_response else (result, None)
+                sb_hists = _get_xsec_hists_inner(
+                    _xsec['sb_smear_flat_idx'], w_sig, _xsec['sb_truth_sig_idx'], true_signal_weights,
+                    _xsec['sb_sig_hist_cv'], _xsec['sb_bkg_reco_idx'], w_bkg, 1,
+                )
             else:
                 hists = np.array([
                     np.bincount(reco_idx, weights=weights[:, u], minlength=n_out)
@@ -406,6 +426,8 @@ def get_syst_hists(reco_df: pd.DataFrame,
             entry = {'hists': hists}
             if response is not None:
                 entry['response'] = response
+            if sb_hists is not None:
+                entry['single_bin_hists'] = sb_hists
             syst_dict[col[2]] = entry
 
     # multisim
@@ -417,6 +439,7 @@ def get_syst_hists(reco_df: pd.DataFrame,
             weights *= scaling[:, np.newaxis]
 
             response = None
+            sb_hists = None
             if is_xsec(col, xsec_inputs):
                 true_signal_weights = xsec_inputs.true_signal_df[col[2:]].values.astype(np.float64) * xsec_inputs.true_signal_scale
                 w_sig = weights[_xsec['sig_mask']]
@@ -427,6 +450,10 @@ def get_syst_hists(reco_df: pd.DataFrame,
                     return_response=save_response,
                 )
                 hists, response = result if save_response else (result, None)
+                sb_hists = _get_xsec_hists_inner(
+                    _xsec['sb_smear_flat_idx'], w_sig, _xsec['sb_truth_sig_idx'], true_signal_weights,
+                    _xsec['sb_sig_hist_cv'], _xsec['sb_bkg_reco_idx'], w_bkg, 1,
+                )
             else:
                 hists = np.array([
                     np.bincount(reco_idx, weights=weights[:, u], minlength=n_out)
@@ -436,6 +463,8 @@ def get_syst_hists(reco_df: pd.DataFrame,
             entry = {'hists': hists}
             if response is not None:
                 entry['response'] = response
+            if sb_hists is not None:
+                entry['single_bin_hists'] = sb_hists
             syst_dict[col[2]] = entry
 
     return syst_dict, cv
@@ -450,12 +479,22 @@ def get_syst(*args, save_response: bool = False, **kwargs) -> dict:
         response matrix under ``syst_dict[key]['response']`` for xsec systematics.
     """
     syst_dict, cv = get_syst_hists(*args, save_response=save_response, **kwargs)
-    
+
+    cv_sb = float(cv.sum())
     for key in syst_dict:
         cov, cov_frac, corr = calc_matrices(syst_dict[key]['hists'], cv)
         syst_dict[key]['cov'] = cov
         syst_dict[key]['cov_frac'] = cov_frac
         syst_dict[key]['corr'] = corr
+
+        # xsec entries store single-bin universe hists (response method applied at
+        # n_bins=1) because sum-over-bins of the multi-bin cov is not the
+        # integrated variance under smearing. Non-xsec entries can use sum(cov).
+        if 'single_bin_hists' in syst_dict[key]:
+            sb = syst_dict[key].pop('single_bin_hists').ravel().astype(float)
+            syst_dict[key]['single_bin_unc'] = float(np.sqrt(np.mean((sb - cv_sb) ** 2)))
+        else:
+            syst_dict[key]['single_bin_unc'] = float(np.sqrt(max(0.0, float(cov.sum()))))
 
     return syst_dict
 
@@ -602,6 +641,7 @@ def get_detvar_systs(detvar_dict, var, bins,
             'cov_frac': cov_frac,
             'corr':     corr,
             'hist_cv':  cv_hist,
+            'single_bin_unc': float(np.sqrt(max(0.0, float(cov.sum())))),
         }
     return matrices_dict
 
@@ -611,7 +651,7 @@ def get_detvar_systs(detvar_dict, var, bins,
 _GENIE_ALIASES = frozenset({"SBNNuSyst", "SuSAv2"})
 
 # Full set of GENIE knob names that use the xsec (event-rate) calculation path.
-_XSEC_KNOBS = frozenset(regen_systematics + ar23p_genie_systematics)
+_XSEC_KNOBS = frozenset(ar23_systematics + ar23p_systematics)
 
 # Ordered list of (subcategory, substrings) for DetVar classification.
 # Checked top-to-bottom; first match wins. The calorimetry entry also

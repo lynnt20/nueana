@@ -105,9 +105,15 @@ def _collect_systs(indf, reco_var, bins, mcbnb_pot, hist_cv, xsec_inputs=None):
 def _collect_detvar_systs(detvar_dict, reco_var, bins, event_type, cuts, select_kwargs,
                           rate_hist_cv, xsec_hist_cv=None, mcbnb_pot=1.0):
     # 'cov' rescaled to events² at mcbnb_pot; 'hists'/'hist_cv' left raw.
+    # 'single_bin_unc' is a sigma (units of events), so scales linearly.
     raw_dict = get_detvar_systs(detvar_dict, reco_var, bins,
                                 event_type=event_type, cuts=cuts, **select_kwargs)
-    syst_dict = {k: {**v, 'cov': v['cov'] * mcbnb_pot ** 2} for k, v in raw_dict.items()}
+    syst_dict = {
+        k: {**v,
+            'cov': v['cov'] * mcbnb_pot ** 2,
+            'single_bin_unc': v.get('single_bin_unc', 0.0) * mcbnb_pot}
+        for k, v in raw_dict.items()
+    }
     rate_df = get_syst_df([syst_dict], rate_hist_cv)
     xsec_df = get_syst_df([syst_dict], xsec_hist_cv) if xsec_hist_cv is not None else None
     return syst_dict, _sum_covs(syst_dict, rate_hist_cv.size), rate_df, xsec_df
@@ -254,6 +260,7 @@ def add_uncertainty(
             "cov_frac": get_fractional_covariance(cov, cv),
             "corr": get_corr_from_cov(cov),
             "hist_cv": cv,
+            "single_bin_unc": float(np.sqrt(max(0.0, float(cov.sum())))),
         }
         if hists is not None:
             entry["hists"] = hists
