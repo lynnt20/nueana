@@ -22,7 +22,7 @@ Data-only fixes
 
 MC + data fixes
 ---------------
-- :func:`fix_sec_shw_energy` — scale secondary shower energy from maxplane_energy
+- :func:`fix_sec_shw_energy` — scale secondary shower energy from collection-plane (I2) energy
 - :func:`add_phi`            — derive shower and track azimuthal angles from direction
 
 Pi0 fix (opt-in, call after preprocess_mc / preprocess_data)
@@ -156,8 +156,8 @@ def preprocess_mc(df: pd.DataFrame, *, flash_pe_scale: float = 0.66) -> pd.DataF
     Applies:
 
     1. :func:`fix_flash_pe_scale`  — flash PE calibration correction
-    2. :func:`fix_prim_shw_energy` — primary shower reco_energy from maxplane_energy
-    3. :func:`fix_sec_shw_energy`  — secondary shower energy from maxplane_energy
+    2. :func:`fix_prim_shw_energy` — primary shower reco_energy from collection-plane (I2) energy
+    3. :func:`fix_sec_shw_energy`  — secondary shower energy from collection-plane (I2) energy
     4. :func:`add_phi`             — shower and track azimuthal angles
 
     All fixes are idempotent; calling this on an already-preprocessed
@@ -183,8 +183,8 @@ def preprocess_data(df: pd.DataFrame, *, flash_time_offset: float = 0.19) -> pd.
     Applies:
 
     1. :func:`fix_flash_time`      — flash time frame-offset correction
-    2. :func:`fix_prim_shw_energy` — primary shower reco_energy from maxplane_energy
-    3. :func:`fix_sec_shw_energy`  — secondary shower energy from maxplane_energy
+    2. :func:`fix_prim_shw_energy` — primary shower reco_energy from collection-plane (I2) energy
+    3. :func:`fix_sec_shw_energy`  — secondary shower energy from collection-plane (I2) energy
     4. :func:`add_phi`             — shower and track azimuthal angles
 
     All fixes are idempotent; calling this on an already-preprocessed
@@ -238,55 +238,65 @@ def add_phi(df: pd.DataFrame) -> pd.DataFrame:
 # Shower energy fixes
 # ---------------------------------------------------------------------------
 
-def fix_prim_shw_energy(df: pd.DataFrame, scale: float = 1.17) -> pd.DataFrame:
-    """Set primary shower reco_energy from maxplane_energy * scale.
+def fix_prim_shw_energy(
+    df: pd.DataFrame,
+    scale: float = 1.17,
+) -> pd.DataFrame:
+    """Set primary shower reco_energy from collection-plane (I2) energy * scale.
 
-    If ``primshw.shw.reco_energy`` already exists, checks that its ratio to
-    ``maxplane_energy`` matches *scale* and warns if not.
+    Mirrors ``_add_reco_energy`` in ``make_nueccdf.py``.
+
+    If ``primshw.shw.reco_energy`` already exists, checks that its values match
+    the expected scaled energy and warns if not.
 
     Parameters
     ----------
     df : pd.DataFrame
-        DataFrame containing ``primshw.shw.maxplane_energy``.
+        DataFrame containing ``primshw.shw.plane.I2.energy``.
     scale : float
-        Energy scale factor (default 1.17).
+        Global energy scale factor (default 1.17).
     """
     name = 'prim_shw_energy'
     if _skip_if_applied(df, name):
         return df
     col = ('primshw', 'shw', 'reco_energy', '', '', '')
     if col in df.columns:
-        ratio = (df[col] / df.primshw.shw.maxplane_energy).dropna()
-        if not np.allclose(ratio, scale, rtol=0.01):
+        expected = df.primshw.shw.plane.I2.energy * scale
+        ratio = (df[col] / expected).dropna()
+        if not np.allclose(ratio, 1.0, rtol=0.01):
             warnings.warn(
-                f"primshw.shw.reco_energy already exists but ratio to maxplane_energy "
-                f"differs from {scale} (mean ratio: {ratio.mean():.3f}). "
-                "Overwriting with maxplane_energy * scale.",
+                f"primshw.shw.reco_energy already exists but differs from "
+                f"plane.I2.energy * {scale} "
+                f"(mean ratio: {ratio.mean():.3f}). "
+                "Overwriting.",
                 stacklevel=2,
             )
-    df[col] = df.primshw.shw.maxplane_energy * scale
+    df[col] = df.primshw.shw.plane.I2.energy * scale
     return _mark_applied(df, name)
 
 
-def fix_sec_shw_energy(df: pd.DataFrame, scale: float = 1.17) -> pd.DataFrame:
-    """Set secondary shower reco_energy from maxplane_energy * scale.
+def fix_sec_shw_energy(
+    df: pd.DataFrame,
+    scale: float = 1.17,
+) -> pd.DataFrame:
+    """Set secondary shower reco_energy from collection-plane (I2) energy * scale.
 
-    Mirrors what :func:`~nueana.selection.select` does for the primary shower.
+    Matches the primary shower treatment in :func:`fix_prim_shw_energy`.
     Must be called before :func:`add_pi0` so the pi0 invariant mass uses the
     scaled energy.
 
     Parameters
     ----------
     df : pd.DataFrame
-        DataFrame containing ``secshw.shw.maxplane_energy``.
+        DataFrame containing ``secshw.shw.plane.I2.energy``.
     scale : float
-        Energy scale factor (default 1.17, matching the primary shower default).
+        Global energy scale factor (default 1.17).
     """
     name = 'sec_shw_energy'
     if _skip_if_applied(df, name):
         return df
     col = ('secshw', 'shw', 'reco_energy', '', '', '')
-    df[col] = df.secshw.shw.maxplane_energy * scale
+    df[col] = df.secshw.shw.plane.I2.energy * scale
     return _mark_applied(df, name)
 
 
