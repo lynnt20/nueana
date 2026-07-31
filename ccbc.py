@@ -28,6 +28,7 @@ from .syst import key_in_allowed
 __all__ = [
     "nonsymmetric_cov",
     "get_ccbc_cov",
+    "ccbc_cov_from_universes",
     "get_constrained_background",
     "plot_ccbc_summary",
     "plot_ccbc_fd_comparison",
@@ -414,6 +415,119 @@ def get_ccbc_cov(
 
 
 # ---------------------------------------------------------------------------
+# Lightweight rate-only constraint (systs=True path)
+# ---------------------------------------------------------------------------
+
+
+def ccbc_cov_from_universes(
+    syst_ps: dict,
+    cv_ps: np.ndarray,
+    syst_bs: dict,
+    cv_bs: np.ndarray,
+    syst_nc: dict,
+    cv_nc: np.ndarray,
+    allowed_keys: Sequence[str] = ("GENIE", "Flux", "Geant4", "MCstat"),
+    rcond: float = 1e-10,
+    data_stat_nc: np.ndarray | None = None,
+    data_stat_ns: np.ndarray | None = None,
+) -> dict:
+    """Build CCBC covariance blocks from raw universe-histogram dicts (systs=True path).
+
+    A rate-only sibling of :func:`get_ccbc_cov` for use when universe columns
+    are already present in the DataFrames (``systs=True``) and calling
+    ``get_total_cov`` is not necessary.  All inputs must be in the same
+    event-count units (``weights_mc``-weighted, at the same POT).
+
+    Parameters
+    ----------
+    syst_ps : dict
+        Output of :func:`~nueana.syst.get_syst` on the signal-only subset of
+        the signal-region DataFrame. Each entry must contain ``'hists'`` with
+        shape ``(nbins, nuniv)``.
+    cv_ps : np.ndarray, shape (nbins,)
+        CV histogram for the signal-only events.
+    syst_bs : dict
+        Output of :func:`~nueana.syst.get_syst` on the background-only subset.
+    cv_bs : np.ndarray, shape (nbins,)
+        CV histogram for background-only events.
+    syst_nc : dict
+        Output of :func:`~nueana.syst.get_syst` on the sideband DataFrame.
+    cv_nc : np.ndarray, shape (nbins,)
+        CV histogram for sideband events.
+    allowed_keys : sequence of str
+        Systematic category names to include. Default: GENIE, Flux, Geant4, MCstat.
+    rcond : float
+        Regularisation cut-off for ``np.linalg.pinv(cov_nc_nc)``. Default 1e-10.
+    data_stat_nc : np.ndarray, shape (nbins, nbins), optional
+        Poisson data-statistical covariance on n_C; added to ``cov_nc_nc``
+        before the pseudoinverse to soften the constraint.
+    data_stat_ns : np.ndarray, shape (nbins, nbins), optional
+        Poisson data-statistical covariance on n_S; added to ``cov_ms_ms``.
+
+    Returns
+    -------
+    dict
+        ``cov_Bs_Bs``, ``cov_Bs_Bs_constr``, ``cov_Ps_Ps``, ``cov_Ps_Bs``,
+        ``cov_Ps_Bs_constr``, ``cov_Bs_nc``, ``cov_nc_nc``, ``cov_ns_ns``,
+        ``cov_ms_ms`` — covariance blocks in event-count² units.
+        ``pinv_nc_nc`` — pseudoinverse of symmetrised ``cov_nc_nc``.
+        ``cv_bs``, ``cv_nc`` — CV arrays for use by :func:`get_constrained_background`.
+    """
+    cv_ps = np.asarray(cv_ps, dtype=float)
+    cv_bs = np.asarray(cv_bs, dtype=float)
+    cv_nc = np.asarray(cv_nc, dtype=float)
+    nbins = len(cv_nc)
+
+    cov_Ps_Ps = np.zeros((nbins, nbins))
+    cov_Bs_Bs = np.zeros((nbins, nbins))
+    cov_nc_nc = np.zeros((nbins, nbins))
+    cov_Ps_Bs = np.zeros((nbins, nbins))
+    cov_Ps_nc = np.zeros((nbins, nbins))
+    cov_Bs_nc = np.zeros((nbins, nbins))
+
+    for key in syst_nc:
+        if not key_in_allowed(key, allowed_keys):
+            continue
+        if key not in syst_bs or key not in syst_ps:
+            continue
+        ps_h = np.asarray(syst_ps[key]["hists"])
+        bs_h = np.asarray(syst_bs[key]["hists"])
+        nc_h = np.asarray(syst_nc[key]["hists"])
+        cov_Ps_Ps += nonsymmetric_cov(ps_h, cv_ps, ps_h, cv_ps)
+        cov_Bs_Bs += nonsymmetric_cov(bs_h, cv_bs, bs_h, cv_bs)
+        cov_nc_nc += nonsymmetric_cov(nc_h, cv_nc, nc_h, cv_nc)
+        cov_Ps_Bs += nonsymmetric_cov(ps_h, cv_ps, bs_h, cv_bs)
+        cov_Ps_nc += nonsymmetric_cov(ps_h, cv_ps, nc_h, cv_nc)
+        cov_Bs_nc += nonsymmetric_cov(bs_h, cv_bs, nc_h, cv_nc)
+
+    cov_nc_nc_sym       = (cov_nc_nc + cov_nc_nc.T) / 2
+    cov_nc_nc_pinv_input = cov_nc_nc_sym + (data_stat_nc if data_stat_nc is not None else 0.0)
+    pinv_nc             = np.linalg.pinv(cov_nc_nc_pinv_input, rcond=rcond)
+    cov_Bs_Bs_constr    = cov_Bs_Bs  - cov_Bs_nc @ pinv_nc @ cov_Bs_nc.T
+    cov_Ps_Bs_constr    = cov_Ps_Bs  - cov_Ps_nc @ pinv_nc @ cov_Bs_nc.T
+    cov_ms_ms           = cov_Ps_Ps  + cov_Ps_Bs_constr + cov_Ps_Bs_constr.T + cov_Bs_Bs_constr
+    cov_ns_ns           = cov_Ps_Ps  + cov_Ps_Bs        + cov_Ps_Bs.T        + cov_Bs_Bs
+    if data_stat_ns is not None:
+        cov_ms_ms = cov_ms_ms + data_stat_ns
+        cov_ns_ns = cov_ns_ns + data_stat_ns
+
+    return {
+        "cov_Ps_Ps":        cov_Ps_Ps,
+        "cov_Bs_Bs":        cov_Bs_Bs,
+        "cov_Bs_Bs_constr": cov_Bs_Bs_constr,
+        "cov_Ps_Bs":        cov_Ps_Bs,
+        "cov_Ps_Bs_constr": cov_Ps_Bs_constr,
+        "cov_Bs_nc":        cov_Bs_nc,
+        "cov_nc_nc":        cov_nc_nc,
+        "cov_ns_ns":        cov_ns_ns,
+        "cov_ms_ms":        cov_ms_ms,
+        "pinv_nc_nc":       pinv_nc,
+        "cv_bs":            cv_bs,
+        "cv_nc":            cv_nc,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Constrained background prediction
 # ---------------------------------------------------------------------------
 
@@ -431,14 +545,16 @@ def get_constrained_background(
         \\hat{B}_S = B_S^{\\rm CV}
             + C_{B_S n_C}\\, C_{n_C n_C}^{+}\\, (n_C^{\\rm FD} - n_C^{\\rm CV})
 
+    Works with dicts from both :func:`get_ccbc_cov` (passes ``Bs_output`` and
+    ``nc_output`` SystematicsOutput objects) and :func:`ccbc_cov_from_universes`
+    (passes ``cv_bs`` and ``cv_nc`` arrays directly).
+
     Parameters
     ----------
     ccbc_cov : dict
-        Output of :func:`get_ccbc_cov`.  Must contain ``"Bs_output"``,
-        ``"nc_output"``, ``"cov_Bs_nc"``, and ``"pinv_nc_nc"``.
+        Output of :func:`get_ccbc_cov` or :func:`ccbc_cov_from_universes`.
     fd_nc_hist : np.ndarray, shape (nbins,)
-        Fake-data control-region histogram in absolute event-count units at
-        mcbnb_pot, matching ``nc_output.rate_hist_cv`` (i.e. ``weights_mc``-weighted).
+        Sideband data histogram in the same event-count units as the CV arrays.
 
     Returns
     -------
@@ -446,9 +562,13 @@ def get_constrained_background(
         Constrained background prediction.  May be negative in extreme
         fake-data scenarios; clamp or inspect as needed.
     """
-    pot_scale = float(ccbc_cov.get("pot_scale", 1.0))
-    cv_Bs = np.asarray(ccbc_cov["Bs_output"].rate_hist_cv) * pot_scale
-    cv_nc = np.asarray(ccbc_cov["nc_output"].rate_hist_cv) * pot_scale
+    if "cv_bs" in ccbc_cov:
+        cv_Bs = np.asarray(ccbc_cov["cv_bs"])
+        cv_nc = np.asarray(ccbc_cov["cv_nc"])
+    else:
+        pot_scale = float(ccbc_cov.get("pot_scale", 1.0))
+        cv_Bs = np.asarray(ccbc_cov["Bs_output"].rate_hist_cv) * pot_scale
+        cv_nc = np.asarray(ccbc_cov["nc_output"].rate_hist_cv) * pot_scale
     shift = ccbc_cov["cov_Bs_nc"] @ ccbc_cov["pinv_nc_nc"] @ (np.asarray(fd_nc_hist) - cv_nc)
     return cv_Bs + shift
 
