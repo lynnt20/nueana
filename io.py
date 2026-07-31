@@ -1,8 +1,11 @@
 """File input/output utilities for loading HDF5 data files."""
 from __future__ import annotations
 
+import contextlib
 import gc
+import os
 import pickle
+import tempfile
 import warnings
 
 import numpy as np
@@ -11,69 +14,131 @@ import pandas as pd
 from .classes import SystematicsOutput
 
 __all__ = ['get_n_split', 'print_keys', 'load_dfs', 'load_mc', 'load_data',
+           'merge_beam_spills',
            'subset_to_pot', 'filter_by_runs',
            'save_signal_checkpoint', 'load_signal_checkpoint',
            'save_sideband_checkpoint', 'load_sideband_checkpoint']
 
-# credit for first three functions to Mun! 
+# ---------------------------------------------------------------------------
+# pnfs / XRootD helpers
+# ---------------------------------------------------------------------------
+
+_XROOTD_PREFIX = "root://fndcadoor.fnal.gov:1094//pnfs/fnal.gov/usr"
+
+
+def _pnfs_to_xrootd(path: str) -> str:
+    """Convert /pnfs POSIX path to an XRootD URL for streaming."""
+    return _XROOTD_PREFIX + path[len("/pnfs"):]
+
+
+def _chunk_copy(src, dst, chunk_size: int = 8 * 1024 * 1024) -> None:
+    while True:
+        chunk = src.read(chunk_size)
+        if not chunk:
+            break
+        dst.write(chunk)
+
+
+@contextlib.contextmanager
+def _local_hdf(file: str):
+    """Yield a local file path, streaming from pnfs via XRootD if needed.
+
+    For /pnfs paths: converts to an XRootD URL, streams the file to a
+    temporary local copy, yields that path, then deletes it on exit.
+    For local paths: yields the path unchanged with no I/O.
+    """
+    if not file.startswith("/pnfs"):
+        yield file
+        return
+
+    try:
+        import fsspec
+    except ImportError as exc:
+        raise ImportError(
+            "fsspec is required to read files from /pnfs. "
+            "Install it with: pip install fsspec fsspec-xrootd"
+        ) from exc
+
+    url = _pnfs_to_xrootd(file)
+    fd, tmp_path = tempfile.mkstemp(suffix=".h5")
+    os.close(fd)
+    try:
+        print(f"Streaming from pnfs: {file}")
+        with fsspec.open(url, "rb") as remote, open(tmp_path, "wb") as local:
+            _chunk_copy(remote, local)
+        yield tmp_path
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+
+def _get_n_split_local(local_path: str) -> int:
+    """Read split count from a local HDF5 file (no pnfs resolution)."""
+    return int(pd.read_hdf(local_path, key="split").n_split.iloc[0])
+
+
+# credit for first three functions to Mun!
 def get_n_split(file):
     """Get the number of splits in an HDF5 file.
-    
+
     Parameters
     ----------
     file : str
-        Path to HDF5 file.
-    
+        Path to HDF5 file. Accepts /pnfs paths (streamed via XRootD).
+
     Returns
     -------
     int
         Number of splits in the file.
     """
-    this_split_df = pd.read_hdf(file, key="split")
-    this_n_split = this_split_df.n_split.iloc[0]
-    return this_n_split
+    with _local_hdf(file) as local_path:
+        return _get_n_split_local(local_path)
 
 def print_keys(file):
     """Print all keys available in an HDF5 file.
-    
+
     Parameters
     ----------
     file : str
-        Path to HDF5 file.
+        Path to HDF5 file. Accepts /pnfs paths (streamed via XRootD).
     """
-    with pd.HDFStore(file, mode='r') as store:
-        keys = store.keys()       # list of all keys in the file
-        print("Keys:", keys)
+    with _local_hdf(file) as local_path:
+        with pd.HDFStore(local_path, mode='r') as store:
+            keys = store.keys()       # list of all keys in the file
+            print("Keys:", keys)
         
 def load_dfs(file, keys2load, n_max_concat=10, start_split=0):
     """Load DataFrames from split HDF5 file.
-    
+
     Parameters
     ----------
     file : str
-        Path to HDF5 file.
+        Path to HDF5 file. Accepts /pnfs paths (streamed via XRootD).
     keys2load : list
         List of key names to load from the file.
     n_max_concat : int, optional
         Maximum number of splits to concatenate (default: 10).
     start_split : int, optional
         Starting split index to load from (default: 0).
-    
+
     Returns
     -------
     dict
         Dictionary mapping key names to concatenated DataFrames.
     """
-    out_df_dict = {}
-    this_n_keys = get_n_split(file) - start_split
-    n_concat = min(n_max_concat, this_n_keys)
-    for key in keys2load:
-        dfs = []  # collect all splits for this key
-        for i in range(start_split, start_split + n_concat):
-            this_df = pd.read_hdf(file, key=f"{key}_{i}")
-            dfs.append(this_df)
-        out_df_dict[key] = pd.concat(dfs, ignore_index=False)
-    return out_df_dict
+    with _local_hdf(file) as local_path:
+        out_df_dict = {}
+        this_n_keys = _get_n_split_local(local_path) - start_split
+        n_concat = min(n_max_concat, this_n_keys)
+        for key in keys2load:
+            dfs = []  # collect all splits for this key
+            for i in range(start_split, start_split + n_concat):
+                this_df = pd.read_hdf(local_path, key=f"{key}_{i}")
+                dfs.append(this_df)
+            out_df_dict[key] = pd.concat(dfs, ignore_index=False)
+        return out_df_dict
 
 
 # ---------------------------------------------------------------------------
@@ -147,34 +212,35 @@ def load_mc(
     if keys is None:
         keys = _DEFAULT_MC_KEYS
 
-    n_total  = get_n_split(file)
-    n_splits = min(max_splits, n_total) if max_splits is not None else n_total
-    starts   = range(0, n_splits, chunk_splits)
-    iterator = _tqdm(starts) if _tqdm is not None else starts
-
     pot    = 0.0
     ngen   = 0.0
     chunks = []
 
-    for i in iterator:
-        n_load = min(chunk_splits, n_splits - i)
-        dfs = load_dfs(file, keys2load=keys, n_max_concat=n_load, start_split=i)
+    with _local_hdf(file) as local_file:
+        n_total  = _get_n_split_local(local_file)
+        n_splits = min(max_splits, n_total) if max_splits is not None else n_total
+        starts   = range(0, n_splits, chunk_splits)
+        iterator = _tqdm(starts) if _tqdm is not None else starts
 
-        if 'histpotdf' in dfs:    pot  += dfs['histpotdf'].TotalPOT.sum()
-        elif 'hdr' in dfs:        pot  += dfs['hdr'].pot.sum()
-        if 'histgenevtdf' in dfs: ngen += dfs['histgenevtdf'].TotalGenEvents.sum()
-        elif 'hdr' in dfs:        ngen += dfs['hdr'][dfs['hdr'].first_in_subrun == 1].ngenevt.sum()
+        for i in iterator:
+            n_load = min(chunk_splits, n_splits - i)
+            dfs = load_dfs(local_file, keys2load=keys, n_max_concat=n_load, start_split=i)
 
-        df    = preprocess_mc(dfs['nuecc'])
-        sel   = select(df, cuts=cuts) if cuts is not None else df
-        chunk = merge_hdr(dfs['hdr'], sel)
-        del dfs
-        chunk = define_signal(chunk, prefix=('slc', 'truth'))
-        if add_pi0:
-            chunk = _add_pi0(chunk)
-        chunks.append(chunk)
-        del chunk
-        gc.collect()
+            if 'histpotdf' in dfs:    pot  += dfs['histpotdf'].TotalPOT.sum()
+            elif 'hdr' in dfs:        pot  += dfs['hdr'].pot.sum()
+            if 'histgenevtdf' in dfs: ngen += dfs['histgenevtdf'].TotalGenEvents.sum()
+            elif 'hdr' in dfs:        ngen += dfs['hdr'][dfs['hdr'].first_in_subrun == 1].ngenevt.sum()
+
+            df    = preprocess_mc(dfs['nuecc'])
+            sel   = select(df, cuts=cuts) if cuts is not None else df
+            chunk = merge_hdr(dfs['hdr'], sel)
+            del dfs
+            chunk = define_signal(chunk, prefix=('slc', 'truth'))
+            if add_pi0:
+                chunk = _add_pi0(chunk)
+            chunks.append(chunk)
+            del chunk
+            gc.collect()
 
     result = pd.concat(chunks, ignore_index=False).copy()
     if excl_mc_df is not None:
@@ -225,7 +291,8 @@ def load_data(
     if keys is None:
         keys = _DEFAULT_DATA_KEYS
 
-    dfs = load_dfs(file, keys2load=keys)
+    with _local_hdf(file) as local_file:
+        dfs = load_dfs(local_file, keys2load=keys)
     df  = merge_hdr(dfs['hdr'], dfs['nuecc'])
     df  = preprocess_data(df)
 
