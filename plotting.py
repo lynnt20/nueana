@@ -688,10 +688,30 @@ def plot_mc_data(mc_df: pd.DataFrame,
     ax_main = fig.add_subplot(gs[0])
     ax_sub = fig.add_subplot(gs[1], sharex=ax_main)
 
-    data_args = dict(df=data_df, var=var, bins=bins, ax=ax_main, normalize=_p.get('normalize', False), overflow=_p.get('overflow', True))
-    mc_args   = dict(indf=mc_df, var=var, bins=bins, ax=ax_main, config=config, **kwargs)
+    normalize = _p.get('normalize', False)
+    overflow  = _p.get('overflow', True)
 
+    # Data is always plotted as raw counts; when normalize=True, MC is scaled so
+    # its area matches the data area rather than dividing data by its own integral.
+    data_args = dict(df=data_df, var=var, bins=bins, ax=ax_main, normalize=False, overflow=overflow)
     data_hist, data_err, data_plot = data_plot_overlay(**data_args)
+
+    mc_kwargs = dict(kwargs)
+    if normalize:
+        _mc_wt  = _get_weight_column(mc_df)
+        _mc_raw = get_hist1d(
+            data=mc_df[var],
+            weights=mc_df[_mc_wt] if _mc_wt is not None else None,
+            bins=np.asarray(bins), overflow=overflow,
+        )
+        _bw       = np.diff(np.asarray(bins))
+        _mc_area  = float(np.sum(_mc_raw * _bw))
+        _dat_area = float(np.sum(data_hist * _bw))
+        if _mc_area > 0:
+            mc_kwargs['scale'] = _dat_area / _mc_area
+        mc_kwargs['normalize'] = False
+    mc_args = dict(indf=mc_df, var=var, bins=bins, ax=ax_main, config=config, **mc_kwargs)
+
     mc_bins, mc_steps, mc_err, mc_dict = plot_var(**mc_args)
     
     xmin, xmax = ax_main.get_xlim()
