@@ -195,7 +195,10 @@ def plot_var(indf: pd.DataFrame,
     percents : bool, default False
         If True, append percentage-of-total to legend labels.
     scale : float, default 1.0
-        Scale factor applied to all histogram bins (and error arrays).
+        Scale factor applied to all histogram bins (and error arrays). When
+        ``systs`` is a ``SystematicsInput``/``SystematicsOutput``, ``indf``'s
+        raw POT is assumed to equal ``systs.mcbnb_pot``; pass
+        ``target_pot / mcbnb_pot`` to move the plot onto ``target_pot``.
     normalize : bool, default False
         If True, normalize histograms so the integral equals 1 (uses bin widths).
     mult_factor : float, default 1.0
@@ -214,8 +217,9 @@ def plot_var(indf: pd.DataFrame,
         - :class:`~nueana.classes.SystematicsInput`: call :func:`~nueana.funcs.get_total_cov`
           on-the-fly with the bundled parameters and use the resulting ``rate_cov``.
         - :class:`~nueana.classes.SystematicsOutput`: use a pre-computed result from
-          :func:`~nueana.funcs.get_total_cov`. The POT is read from
-          ``systs.mcbnb_pot`` (set automatically by :func:`~nueana.funcs.get_total_cov`).
+          :func:`~nueana.funcs.get_total_cov`. ``rate_cov`` is assumed to be in
+          events² at ``systs.mcbnb_pot``; the caller's ``scale`` moves it onto
+          the target POT together with the plotted histograms.
         - ``None`` (default): MC stat error only (diagonal, sum-of-weights-squared).
     pdg : bool, default False
         Stack by PDG code rather than signal type.
@@ -333,8 +337,11 @@ def plot_var(indf: pd.DataFrame,
         this_offbeam_df = indf[indf.signal == signal_dict['offbeam']]#.sort_index()
         # really only want to see electrons that are
         # primaries from a FV neutrino interaction
-        where_notprim = ((abs(this_nu_df[pdg_col])==11) &
-                          (this_nu_df[process_col] != 0))
+        if process_col in indf.columns:
+            where_notprim = ((abs(this_nu_df[pdg_col])==11) &
+                              (this_nu_df[process_col] != 0))
+        else:
+            where_notprim = pd.Series(False, index=this_nu_df.index)
         this_notprim_df   = this_nu_df[where_notprim]
         this_nu_df         = this_nu_df[~where_notprim]
         this_other         = this_nu_df.copy()
@@ -395,15 +402,20 @@ def plot_var(indf: pd.DataFrame,
     _mcstat_err_annot = None
     _syst_source = 'none'  # 'none' | 'reweight_only' | 'full' — tags scope of the syst band
 
-    def _apply_syst_output(output, hist_scale):
-        """Shared logic for SystematicsInput and SystematicsOutput paths."""
-        _total_cov = np.array(output.rate_cov, dtype=float, copy=True) * hist_scale**2
+    def _apply_syst_output(output):
+        """Shared logic for SystematicsInput and SystematicsOutput paths.
+
+        Assumes ``output.rate_cov`` is in events² at ``output.mcbnb_pot`` (the
+        invariant enforced by ``get_total_cov``). The caller's ``scale`` then
+        moves both hists and cov onto the target POT together.
+        """
+        _total_cov = np.array(output.rate_cov, dtype=float, copy=True)
         _systs_arr = np.sqrt(np.clip(np.diag(_total_cov), a_min=0.0, a_max=None))
         _syst_dict = dict(output.rate_syst_dict)
         _mcstat_key = next((k for k in _syst_dict if str(k).lower() == 'mcstat'), None)
         _calc_sep   = _mcstat_key is None
         _mcstat_ann = (
-            np.sqrt(np.diag(_syst_dict[_mcstat_key]['cov'] * hist_scale**2)) * scale
+            np.sqrt(np.diag(_syst_dict[_mcstat_key]['cov'])) * scale
             if _mcstat_key is not None else None
         )
         return _total_cov, _systs_arr, _syst_dict, _calc_sep, _mcstat_ann
@@ -412,14 +424,14 @@ def plot_var(indf: pd.DataFrame,
         # Case 1: call get_total_cov on-the-fly with the bundled parameters.
         from .funcs import get_total_cov
         _output = get_total_cov(reco_df=indf, reco_var=var, bins=bins, **systs.to_kwargs())
-        total_cov, systs_arr, syst_dict, calc_separate_mcstat, _mcstat_err_annot = _apply_syst_output(_output, 1.0)
+        total_cov, systs_arr, syst_dict, calc_separate_mcstat, _mcstat_err_annot = _apply_syst_output(_output)
         _syst_source = 'full'
 
     elif isinstance(systs, SystematicsOutput) or type(systs).__name__ == 'SystematicsOutput':
         # Case 2: caller already ran get_total_cov and passes the result directly.
         if systs.mcbnb_pot is None:
             raise ValueError("SystematicsOutput.mcbnb_pot is not set; use get_total_cov to produce it")
-        total_cov, systs_arr, syst_dict, calc_separate_mcstat, _mcstat_err_annot = _apply_syst_output(systs, 1.0)
+        total_cov, systs_arr, syst_dict, calc_separate_mcstat, _mcstat_err_annot = _apply_syst_output(systs)
         _syst_source = 'full'
 
     elif systs is True:
@@ -434,7 +446,7 @@ def plot_var(indf: pd.DataFrame,
             systs_arr = np.zeros(len(bins)-1)
             calc_separate_mcstat = True
         else:
-            syst_dict = get_syst(reco_df=indf, reco_var=var, bins=bins, scale=False)
+            syst_dict = get_syst(reco_df=indf, reco_var=var, bins=bins)
             has_mcstat = any(str(k).lower() == 'mcstat' for k in syst_dict)
             for key in syst_dict:
                 total_cov += syst_dict[key]['cov']
