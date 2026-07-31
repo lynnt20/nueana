@@ -31,6 +31,7 @@ __all__ = [
     'plot_var_pdg',
     'data_plot_overlay',
     'plot_mc_data',
+    'plot_mc_data_ccbc',
     'plot_detvar',
     'plot_syst_category_breakdown',
     'plot_syst_breakdown',
@@ -866,6 +867,353 @@ def plot_mc_data(mc_df: pd.DataFrame,
         plt.savefig(savefig,bbox_inches='tight')
 
     return fig, ax_main, ax_sub, mc_dict
+
+
+def plot_mc_data_ccbc(
+    mc_df: pd.DataFrame,
+    data_df: pd.DataFrame,
+    side_mc_df: pd.DataFrame,
+    side_data_df: pd.DataFrame,
+    var: str | tuple,
+    bins: np.ndarray,
+    side_var: str | tuple,
+    ccbc_cov: dict | None = None,
+    allowed_keys: tuple = ("GENIE", "Flux", "Geant4", "MCstat"),
+    scale: float = 1.0,
+    overflow: bool = True,
+    figsize: tuple[int, int] = (7, 6),
+    ratio_min: float = 0.0,
+    ratio_max: float = 2.0,
+    ylim_scale: float = 1.5,
+    xlabel: str = "",
+    ylabel: str = "Events",
+    title: str = "",
+    signal_label: str = "Signal",
+    bkg_label: str = "Background (w/ CCBC)",
+    signal_color: str = "C0",
+    bkg_color: str = "C1",
+    counts: bool = False,
+    percents: bool = False,
+    data_first: bool = True,
+    cut_val: list | None = None,
+    bin_labels: list | None = None,
+    legend_kwargs: dict | None = None,
+    annot: bool = True,
+    internal: bool = True,
+    savefig: str = "",
+) -> tuple[plt.Figure, plt.Axes, plt.Axes, dict]:
+    """MC+data plot with CCBC-constrained background (systs=True path).
+
+    Stacks signal (``signal == 0``) and CCBC-constrained background
+    (``signal != 0``) using universe columns already present in the DataFrames,
+    draws a ``cov_ms_ms`` syst band, data overlay, ratio panel, and chi-sq
+    annotation — mirroring :func:`plot_mc_data`.
+
+    Parameters
+    ----------
+    mc_df : pd.DataFrame
+        Signal-region MC DataFrame (must have a ``signal`` column and universe
+        weight columns so ``systs=True`` works).
+    data_df : pd.DataFrame
+        Signal-region data DataFrame.
+    side_mc_df : pd.DataFrame
+        Sideband MC DataFrame (universe columns required).
+    side_data_df : pd.DataFrame
+        Sideband data DataFrame.
+    var : str or tuple
+        Variable to plot in the signal region (and used as the sideband
+        variable after ``side_var`` is applied).
+    bins : np.ndarray
+        Shared bin edges for both the signal region and sideband.
+    side_var : str or tuple
+        Variable to histogram in the sideband DataFrames.
+    ccbc_cov : dict, optional
+        Pre-computed output of :func:`~nueana.ccbc.ccbc_cov_from_universes`.
+        When supplied, the sideband universe histograms are not recomputed —
+        pass this when looping over many signal-region variables so the sideband
+        work is done once.
+    allowed_keys : tuple of str
+        Systematic categories forwarded to :func:`~nueana.ccbc.ccbc_cov_from_universes`.
+    scale : float, default 1.0
+        Multiplicative scale applied to all histograms and covariances
+        (use ``projected_pot / mcbnb_pot`` to move onto a target POT).
+    overflow : bool, default True
+        Fold out-of-range values into edge bins.
+    signal_label, bkg_label : str
+        Legend labels for the two stack categories.
+    signal_color, bkg_color : str
+        Fill colours for the two stack categories.
+    counts : bool, default False
+        If True, append scaled event counts to each category's legend label.
+    percents : bool, default False
+        If True, append each category's percentage of the total MC to its
+        legend label.
+    cut_val : list of float, optional
+        x-values for vertical dashed cut lines.
+    annot : bool, default True
+        Annotate with integrated Data/Pred ratio and chi-sq / p-value.
+    savefig : str, optional
+        Path to save the figure; skipped when empty.
+
+    Returns
+    -------
+    fig, ax_main, ax_sub, out_dict
+        ``out_dict`` contains ``ccbc_cov``, ``constrained_bkg``,
+        ``cov_ms_ms``, and ``total_cov`` for downstream reuse.
+    """
+    from .syst import get_syst
+    from .ccbc import ccbc_cov_from_universes, get_constrained_background
+    from .utils import get_hist1d, ensure_lexsorted
+
+    mc_df      = ensure_lexsorted(mc_df,      axis=1)
+    side_mc_df = ensure_lexsorted(side_mc_df, axis=1)
+
+    sig_mask = mc_df.signal == 0
+    bkg_mask = ~sig_mask
+
+    _weight_col = _get_weight_column(mc_df)
+    _side_weight_col = _get_weight_column(side_mc_df)
+
+    cv_ps = get_hist1d(
+        data=mc_df[sig_mask][var],
+        weights=mc_df[sig_mask][_weight_col] if _weight_col else None,
+        bins=bins, overflow=overflow,
+    )
+    cv_bs = get_hist1d(
+        data=mc_df[bkg_mask][var],
+        weights=mc_df[bkg_mask][_weight_col] if _weight_col else None,
+        bins=bins, overflow=overflow,
+    )
+
+    # Build CCBC covariance — reuse cached sideband if supplied.
+    if ccbc_cov is None:
+        from .syst import get_syst_hists
+        syst_ps_h, _ = get_syst_hists(mc_df[sig_mask],  var,      bins)
+        syst_bs_h, _ = get_syst_hists(mc_df[bkg_mask],  var,      bins)
+        syst_nc_h, _ = get_syst_hists(side_mc_df,       side_var, bins)
+        cv_nc = get_hist1d(
+            data=side_mc_df[side_var],
+            weights=side_mc_df[_side_weight_col] if _side_weight_col else None,
+            bins=bins, overflow=overflow,
+        )
+        # data_stat_nc must be in mcbnb_pot units (same as cov_nc_nc).
+        # Raw data counts are at data_pot; dividing by scale converts to mcbnb_pot.
+        # Poisson variance of (data_nc / scale) is also data_nc / scale.
+        _data_nc_raw = get_hist1d(data=side_data_df[side_var], bins=bins, overflow=overflow)
+        data_stat_nc = np.diag(_data_nc_raw / scale)
+        ccbc_cov = ccbc_cov_from_universes(
+            syst_ps_h, cv_ps,
+            syst_bs_h, cv_bs,
+            syst_nc_h, cv_nc,
+            allowed_keys=allowed_keys,
+            data_stat_nc=data_stat_nc,
+        )
+
+    # Pass data in mcbnb_pot units so (data_nc - cv_nc) is a meaningful residual.
+    # constrained_bkg is returned in mcbnb_pot units; bkg_hist = constrained_bkg * scale
+    # below brings it onto the target POT, consistent with sig_hist = cv_ps * scale.
+    data_nc = get_hist1d(data=side_data_df[side_var], bins=bins, overflow=overflow)
+    constrained_bkg = get_constrained_background(ccbc_cov, data_nc / scale)
+
+    # MC stat variance (sum of w^2 per bin) for the combined stack.
+    mc_stat_var = get_hist1d(
+        data=mc_df[var],
+        weights=np.square(mc_df[_weight_col]) if _weight_col else None,
+        bins=bins, overflow=overflow,
+    )
+
+    # Full covariance: cov_ms_ms (syst, already contains signal+bkg blocks)
+    # plus diagonal MC stat.
+    cov_ms_ms = np.asarray(ccbc_cov["cov_ms_ms"]) * scale ** 2
+    total_cov = cov_ms_ms + np.diag(mc_stat_var) * scale ** 2
+    total_err = np.sqrt(np.clip(np.diag(total_cov), 0.0, None))
+
+    # --- Draw ---
+    fig = plt.figure(figsize=figsize)
+    gs     = GridSpec(2, 1, height_ratios=[6, 1], hspace=0.05)
+    ax_main = fig.add_subplot(gs[0])
+    ax_sub  = fig.add_subplot(gs[1], sharex=ax_main)
+
+    alpha  = 0.4
+    nbins  = len(bins) - 1
+
+    sig_hist = cv_ps * scale
+    bkg_hist = constrained_bkg * scale
+
+    def _fmt_count(n):
+        return f" ({int(n):,})" if n < 1e6 else f" ({n:.2e})"
+
+    if counts:
+        signal_label = signal_label + _fmt_count(np.sum(sig_hist))
+        bkg_label    = bkg_label    + _fmt_count(np.sum(bkg_hist))
+    if percents:
+        _total = np.sum(sig_hist) + np.sum(bkg_hist)
+        if _total > 0:
+            signal_label = signal_label + f" ({np.sum(sig_hist) / _total * 100:.1f}%)"
+            bkg_label    = bkg_label    + f" ({np.sum(bkg_hist) / _total * 100:.1f}%)"
+
+    # Stacked fill: background first (bottom), signal on top.
+    bkg_step = np.insert(bkg_hist, 0, bkg_hist[0])
+    tot_step = np.insert(sig_hist + bkg_hist, 0, (sig_hist + bkg_hist)[0])
+
+    ax_main.fill_between(bins, 0,        bkg_step, step="pre",
+                         facecolor=mpl.colors.to_rgba(bkg_color, alpha),
+                         edgecolor=mpl.colors.to_rgba(bkg_color, 1.0),
+                         lw=1.5, label=bkg_label)
+    ax_main.fill_between(bins, bkg_step, tot_step, step="pre",
+                         facecolor=mpl.colors.to_rgba(signal_color, alpha),
+                         edgecolor=mpl.colors.to_rgba(signal_color, 1.0),
+                         lw=1.5, label=signal_label)
+
+    _draw_step_band(ax_main, bins, total_err, center=tot_step,
+                    color=mpl.colors.to_rgba("gray", 0.75),
+                    lw=0.0, facecolor="none", hatch="xxx",
+                    label="MC stat.+syst.\n(GENIE+Flux+G4, w/ CCBC)")
+
+    # Data overlay.
+    data_hist   = get_hist1d(data=data_df[var], bins=bins, overflow=overflow)
+    data_err    = np.sqrt(data_hist)
+    bin_centers = 0.5 * (bins[1:] + bins[:-1])
+    data_count_label = (f" ({int(np.sum(data_hist)):,})" if np.sum(data_hist) < 1e6
+                        else f" ({np.sum(data_hist):.2e})")
+    ax_main.errorbar(bin_centers, data_hist, yerr=data_err,
+                     fmt='.', color='black', zorder=1e3,
+                     label="data" + data_count_label)
+
+    # Ratio panel.
+    mc_tot = (sig_hist + bkg_hist)
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", message="invalid value encountered in divide")
+        ratio      = np.where(mc_tot > 0, data_hist / mc_tot, np.nan)
+        ratio_err  = np.where(mc_tot > 0, data_err  / mc_tot, np.nan)
+        mc_contrib = np.where(mc_tot > 0, total_err / mc_tot, 0.0)
+
+    ax_sub.errorbar(bin_centers, ratio, yerr=ratio_err,
+                    fmt='s', markersize=3, color='black', zorder=1e3)
+    _draw_step_band(ax_sub, bins, mc_contrib,
+                    color=mpl.colors.to_rgba("gray", 0.4), lw=0.0)
+    ax_sub.axhline(1, color='red', linestyle='--', linewidth=1, zorder=0)
+    ax_sub.set_ylim(ratio_min, ratio_max)
+    ax_sub.set_ylabel("Data/Pred")
+
+    xmin, xmax = ax_main.get_xlim()
+    ax_sub.set_xlim(xmin, xmax)
+
+    if cut_val is not None:
+        for cut in cut_val:
+            ax_main.axvline(cut, lw=2, color="gray", linestyle="--", zorder=nbins + 2)
+            ax_sub.axvline (cut, lw=2, color="black", linestyle="--", alpha=0.5, zorder=1e2)
+
+    # Compute annotation values before drawing legend (no canvas ops yet).
+    if annot:
+        total_data  = np.sum(data_hist)
+        total_mc    = np.sum(mc_tot)
+        total_ratio = total_data / total_mc if total_mc > 0 else np.nan
+        data_cov    = np.diag(np.square(data_err))
+        counts_cov  = data_cov + total_cov
+        valid = np.isfinite(data_hist) & np.isfinite(mc_tot)
+        chi2  = np.nan
+        if np.count_nonzero(valid) > 0:
+            delta   = data_hist[valid] - mc_tot[valid]
+            cov_sel = counts_cov[np.ix_(valid, valid)]
+            try:
+                chi2 = float(delta @ np.linalg.pinv(cov_sel) @ delta)
+            except np.linalg.LinAlgError:
+                pass
+        ann_lines = []
+        if np.isfinite(total_ratio) and total_mc > 0:
+            _prop = total_ratio / total_mc   # d(ratio)/d(MC) propagation factor
+            _data_stat_err  = np.sqrt(total_data) / total_mc
+            _mc_stat_err    = np.sqrt(np.sum(mc_stat_var)) * scale * _prop
+            _ratio_stat_err = np.sqrt(_data_stat_err ** 2 + _mc_stat_err ** 2)
+            _ratio_syst_err = np.sqrt(max(0.0, float(np.sum(cov_ms_ms)))) * _prop
+            ann_lines.append(
+                rf"$\Sigma$ Data/Pred = {total_ratio:.4f}"
+                rf" $\pm$ {_ratio_stat_err:.2f} (stat.)"
+                rf" $\pm$ {_ratio_syst_err:.2f} (syst.)"
+            )
+        if np.isfinite(chi2):
+            p_str = (f"{chi2_dist.sf(chi2, nbins):.2g}" if chi2_dist is not None else "N/A")
+            ann_lines.append(rf"$\chi^2$/ndf = {chi2:.1f}/{nbins}, $p$ = {p_str}")
+
+    _var_str = var if isinstance(var, str) else '_'.join(str(v) for v in var)
+    ax_sub.set_xlabel(_var_str if xlabel == "" else xlabel, fontsize=12)
+    ax_main.set_xlabel("")
+    ax_main.set_ylabel("Events" if ylabel == "" else ylabel, fontsize=12)
+    ax_main.set_title(_var_str if title == "" else title)
+    plt.setp(ax_main.get_xticklabels(), visible=False)
+    ax_main.tick_params(axis='x', which='both', bottom=True, top=False)
+
+    if bin_labels is not None:
+        ax_main.set_xticks(bins)
+        plt.setp(ax_main.get_xticklabels(), visible=False)
+        ax_main.xaxis.set_minor_locator(mpl.ticker.NullLocator())
+        ax_sub.set_xticks(bins)
+        ax_sub.set_xticklabels(bin_labels)
+    else:
+        ax_sub.xaxis.set_minor_locator(_clipped_minor_locator(bins[0], bins[-1]))
+    ax_sub.yaxis.set_minor_locator(mpl.ticker.AutoMinorLocator())
+
+    if ylim_scale != 1.0:
+        ax_main.set_ylim(bottom=0, top=ax_main.get_ylim()[1] * ylim_scale)
+
+    _leg_kw = {'ncol': 2, 'loc': 'upper right'}
+    if legend_kwargs:
+        _leg_kw.update(legend_kwargs)
+    ax_main.legend(**_leg_kw).set_zorder(_TEXT_ZORDER)
+    if data_first:
+        handles, labels = ax_main.get_legend_handles_labels()
+        idx = next((i for i, l in enumerate(labels) if l.startswith('data')), None)
+        if idx is not None and idx != 0:
+            order = [idx] + [i for i in range(len(labels)) if i != idx]
+            ax_main.legend(
+                [handles[i] for i in order], [labels[i] for i in order], **_leg_kw
+            ).set_zorder(_TEXT_ZORDER)
+    annotate_sbnd(ax_main, internal=internal)
+
+    # Position annotation below the legend (mirrors plot_mc_data).
+    if annot and ann_lines:
+        fig.canvas.draw()
+        legend_loc  = str((_leg_kw).get('loc', '')).lower()
+        main_legend = ax_main.get_legend()
+        if main_legend is not None:
+            renderer     = fig.canvas.get_renderer()
+            legend_box   = main_legend.get_window_extent(renderer).transformed(ax_main.transAxes.inverted())
+            ann_fontsize = main_legend.get_texts()[0].get_fontsize() if main_legend.get_texts() else 'small'
+        else:
+            legend_box, ann_fontsize = None, 'small'
+        if 'right' in legend_loc:
+            anchor_right = True
+        elif 'left' in legend_loc or 'center' in legend_loc:
+            anchor_right = False
+        else:
+            anchor_right = legend_box is not None and legend_box.x0 > 0.5
+        if legend_box is not None:
+            ann_x, ann_y = (legend_box.x1 if anchor_right else legend_box.x0), legend_box.y0
+        else:
+            ann_x, ann_y = (0.98, 0.98) if anchor_right else (0.02, 0.98)
+        ann_ha = 'right' if anchor_right else 'left'
+        ax_main.annotate(
+            "\n".join(ann_lines),
+            xy=(ann_x, ann_y),
+            xycoords=ax_main.transAxes,
+            xytext=(0, -6), textcoords='offset points',
+            ha=ann_ha, va='top', fontsize=ann_fontsize,
+            zorder=_TEXT_ZORDER,
+            bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
+                      edgecolor='none', alpha=0.5),
+        )
+
+    if savefig:
+        plt.savefig(savefig, bbox_inches='tight')
+
+    out_dict = {
+        "ccbc_cov":        ccbc_cov,
+        "constrained_bkg": constrained_bkg,
+        "cov_ms_ms":       cov_ms_ms,
+        "total_cov":       total_cov,
+    }
+    return fig, ax_main, ax_sub, out_dict
 
 
 def plot_detvar(
