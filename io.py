@@ -313,6 +313,105 @@ def load_data(
     return sel, pot, ngates
 
 
+def merge_beam_spills(
+    dt_dfs: dict,
+    fom_range: tuple = (0.98, 1.0),
+    verbose: bool = True,
+) -> tuple:
+    """Annotate the trigger header with beam-spill monitoring columns.
+
+    Merges ``dt_dfs['hdr']`` with ``dt_dfs['trigger']`` to obtain
+    ``global_trigger_time``, then matches each trigger event to the most
+    recent BNB spill in ``dt_dfs['pot']`` via :func:`numpy.searchsorted`.
+    Matching is done per-ntuple first; events whose ntuple has no POT entry
+    fall back to the nearest global spill.
+
+    Parameters
+    ----------
+    dt_dfs : dict
+        Dictionary of DataFrames as returned by :func:`load_dfs`, expected
+        to contain keys ``'hdr'``, ``'trigger'``, and ``'pot'``.
+    fom_range : tuple of (float, float), default (0.98, 1.0)
+        Inclusive ``[lo, hi]`` range on the ``FOM`` column used when summing
+        good-quality BNB POT from the spill table.
+    verbose : bool, default True
+        If True, print matching diagnostics and total POT to stdout.
+
+    Returns
+    -------
+    hdr_df : pd.DataFrame
+        Copy of ``dt_dfs['hdr']`` with beam columns
+        ``['TOR875', 'TOR860', 'FOM', 'THCURR', 'spill_time']`` added.
+    bnb_pot : float
+        Sum of ``TOR875`` over spills whose ``FOM`` falls within *fom_range*.
+    """
+    _BEAM_COLS = ['TOR875', 'TOR860', 'FOM', 'THCURR', 'spill_time']
+
+    hdr_df = pd.merge(
+        dt_dfs['hdr'],
+        dt_dfs['trigger'][['global_trigger_time']],
+        left_index=True,
+        right_index=True,
+    )
+
+    pot_df = dt_dfs['pot'].copy()
+    pot_df['spill_time'] = pot_df['spill_time_sec'] * 1e9 + pot_df['spill_time_nsec']
+
+    pot_reset = pot_df.reset_index()
+    hdr_reset = hdr_df.reset_index()[['__ntuple', 'entry', 'file_idx', 'evt', 'global_trigger_time']]
+    hdr_reset['_orig_idx'] = np.arange(len(hdr_reset))
+
+    pot_by_ntuple = {
+        ntuple: grp.sort_values('spill_time').reset_index(drop=True)
+        for ntuple, grp in pot_reset.groupby('__ntuple')
+    }
+    all_spills = pot_reset.sort_values('spill_time').reset_index(drop=True)
+
+    results = []
+    n_global_fallback = 0
+    fallback_rows = []
+
+    for ntuple, hdr_grp in hdr_reset.groupby('__ntuple'):
+        spills = pot_by_ntuple.get(ntuple)
+        if spills is None:
+            spills = all_spills
+            n_global_fallback += len(hdr_grp)
+            fallback_rows.append(hdr_grp[['__ntuple', 'entry', 'evt', 'global_trigger_time']])
+
+        times = spills['spill_time'].values
+        trig  = hdr_grp['global_trigger_time'].values
+        idx   = np.clip(np.searchsorted(times, trig, side='right') - 1, 0, len(spills) - 1)
+
+        matched = spills.iloc[idx][_BEAM_COLS].reset_index(drop=True)
+        part    = pd.concat([hdr_grp[['_orig_idx']].reset_index(drop=True), matched], axis=1)
+        results.append(part)
+
+    matched_ordered = pd.concat(results, ignore_index=True).sort_values('_orig_idx')
+    for col in _BEAM_COLS:
+        hdr_df[col] = matched_ordered[col].values
+
+    fom_lo, fom_hi = fom_range
+    bnb_pot = pot_df[(pot_df.FOM >= fom_lo) & (pot_df.FOM <= fom_hi)].TOR875.sum()
+
+    if verbose:
+        n_matched = hdr_df['TOR875'].notna().sum()
+        n_total   = len(hdr_df)
+        if n_global_fallback:
+            print(f"  {n_global_fallback} event(s) had no pot entry for their ntuple "
+                  f"— matched to nearest global spill instead.")
+            print(pd.concat(fallback_rows, ignore_index=True).to_string(index=False))
+        print(f"Matched {n_matched} / {n_total} events to a beam spill.")
+        failures = hdr_df[hdr_df['TOR875'].isna()]
+        if len(failures) > 0:
+            print(f"\n=== {len(failures)} UNMATCHED EVENT(S) ===")
+            print(failures.reset_index()[['__ntuple', 'entry', 'evt', 'global_trigger_time']].to_string())
+        else:
+            print("All events matched successfully.")
+        print(f"Total POT in pot table: {bnb_pot:.3e} (from {len(pot_df)} spills)")
+
+    return hdr_df, bnb_pot
+
+
 # ---------------------------------------------------------------------------
 # POT subsetting
 # ---------------------------------------------------------------------------
