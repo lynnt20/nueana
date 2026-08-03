@@ -646,10 +646,6 @@ def get_detvar_systs(detvar_dict, var, bins,
     return matrices_dict
 
 
-# Keys that should be classified as GENIE but don't contain "GENIE" in their name.
-# Extracted keys for these get a "+" suffix to flag the special treatment.
-_GENIE_ALIASES = frozenset({"SBNNuSyst", "SuSAv2"})
-
 # Full set of GENIE knob names that use the xsec (event-rate) calculation path.
 _XSEC_KNOBS = frozenset(ar23_systematics + ar23p_systematics)
 
@@ -668,36 +664,36 @@ _CATEGORY_KEYWORDS = ["GENIE", "Flux", "MCstat", "DetVar", "Geant4","Cosmic",'NT
 
 def _extract_genie_key(key: str) -> str:
     """Extract GENIE systematic key.
-    
+
     For standard GENIE keys with multisigma/multisim pattern, extract text after the pattern.
-    For special cases like MECq0q3InterpWeighting, format as Model_MEC_q0binN.
-    
+    For MECq0q3InterpWeighting keys, format as Model_MEC_q0binN.
+    For all other keys (e.g. CCQETemplateReweight, ZExpPCAWeighter), strip the
+    {Prefix}_SBN_v{N}_ header and return the remainder.
+
     Parameters
     ----------
     key : str
         The full GENIE systematic key.
-    
+
     Returns
     -------
     str
         Extracted key fragment.
     """
-    # Try extracting after multisigma_ or multisim_ pattern
+    # Try extracting after multisigma_ or multisim_ pattern (ar23 v1 keys)
     for pattern in ["multisigma_", "multisim_"]:
         if pattern in key:
             return key.split(pattern, 1)[1]
-    
-    # Special handling for MECq0q3InterpWeighting keys
-    # Format: MECq0q3InterpWeighting_SuSAv2To{Model}_q0binned_MECResponse_q0bin{N}
+
+    # MECq0q3InterpWeighting: format is {Prefix}_SBN_v3_SuSATo{Model}_MECResponse_q0bin{N}
     if "MECq0q3InterpWeighting" in key:
         parts = key.split("_")
-        # parts[1] contains "SuSAv2ToValenica" or "SuSAv2ToMartini" etc.
-        model = parts[1].split("To")[1]  # Extract text after "To"
-        q0_bin = parts[-1]  # Last part is "q0bin0", "q0bin1", etc.
+        model = parts[3].split("To", 1)[-1]  # "Val" or "Mar" from "SuSAToVal"/"SuSAToMar"
+        q0_bin = parts[-1]
         return f"{model}_MEC_{q0_bin}"
-    
-    # Fallback to old behavior for unrecognized patterns
-    return "_".join(key.split("_")[4:])
+
+    # All other ar23p/other keys follow {Prefix}_SBN_v{N}_{meaningful...}
+    return "_".join(key.split("_")[3:])
 
 
 _KEY_EXTRACTORS = {
@@ -711,7 +707,7 @@ _KEY_EXTRACTORS = {
 
 def _classify_category(key: str) -> str | None:
     """Map a raw systematic key to its high-level category, or None if unknown."""
-    if any(alias in key for alias in _GENIE_ALIASES):
+    if key in _XSEC_KNOBS:
         return "GENIE"
     return next((cat for cat in _CATEGORY_KEYWORDS if cat in key), None)
 
@@ -792,8 +788,6 @@ def get_syst_df(dicts: list, cv_hist: np.ndarray) -> pd.DataFrame:
                 continue
 
             extracted_key = _KEY_EXTRACTORS[category](raw_key)
-            if category == "GENIE" and any(alias in raw_key for alias in _GENIE_ALIASES):
-                extracted_key += "+"
 
             subcategory = _classify_detvar_subcategory(extracted_key) if category == "DetVar" else category
             records.append({
