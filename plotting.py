@@ -1393,14 +1393,16 @@ def plot_syst_category_breakdown(
             syst_df = syst_output.rate_syst_df
             cv_hist = np.asarray(syst_output.rate_hist_cv)
 
+        _display_pot = getattr(syst_output, 'data_pot', None) or projected_pot
+        pot_scale = _display_pot / syst_output.mcbnb_pot
+
         if show_cv:
             plt.subplots_adjust(wspace=0.5)
-            pot_scale = projected_pot / syst_output.mcbnb_pot
             cv_counts = cv_hist * pot_scale
             ax_cv = ax.twinx()
             ax_cv.stairs(cv_counts, bins, fill=True, alpha=0.25, color='steelblue', lw=0)
             ax_cv.set_ylim(bottom=0, top=np.max(cv_counts) * 1.25)
-            pot_label = f"{projected_pot:.0e}".replace("e+", "e").replace("e0", "e")
+            pot_label = f"{_display_pot:.3g}"
             ax_cv.set_ylabel(f"Predicted Events ({pot_label} POT)", color='steelblue', alpha=0.7, fontsize=10)
             ax_cv.tick_params(axis='y', labelcolor='steelblue')
             ax_cv.set_zorder(ax.get_zorder() - 1)
@@ -1415,12 +1417,14 @@ def plot_syst_category_breakdown(
             if category not in cat.index:
                 continue
             style = category_dict[category]
+            _label = (f"Data statistics\n[{_display_pot:.3g} POT]"
+                      if category == 'Datastat' else style['label'])
             ax.stairs(
                 cat[category] * 100,
                 bins,
                 lw=1.8,
                 linestyle=style['line'],
-                label=f"{style['label']} ({sums.get(category, 0.):.1%})",
+                label=f"{_label} ({sums.get(category, 0.):.1%})",
                 color=style['color'],
                 alpha=0.8,
             )

@@ -427,6 +427,8 @@ def get_total_cov(reco_df, reco_var, bins, mcbnb_pot,
                   detvar_dict: dict | None = None,
                   pot_norm_unc: float = POT_NORM_UNC,
                   ntargets_unc: float = NTARGETS_UNC,
+                  data_df: pd.DataFrame | None = None,
+                  data_pot: float | None = None,
                   **select_kwargs):
     """
     Get the total event-rate covariance matrix and systematic dataframe for a
@@ -482,6 +484,13 @@ def get_total_cov(reco_df, reco_var, bins, mcbnb_pot,
     ntargets_unc : float, optional
         Fractional uncertainty on the number of Ar targets.
         Defaults to ``analysis.NTARGETS_UNC`` (1%).
+    data_df : pd.DataFrame, optional
+        Real data DataFrame with the same column structure as ``reco_df``. When
+        provided, the Datastat row uses ``sqrt(N_data)`` per bin. When None,
+        falls back to the projected MC estimate at ``projected_pot``.
+    data_pot : float, optional
+        Actual data POT. Required when ``data_df`` is provided; used to scale
+        the MC CV when computing the fractional Datastat uncertainty.
 
     Returns
     -------
@@ -573,11 +582,18 @@ def get_total_cov(reco_df, reco_var, bins, mcbnb_pot,
             xsec_syst_dict.update(d); xsec_total_cov += c; xsec_syst_frames.append(xsec_df)
 
     if include_rate or include_xsec:
-        data_err = np.sqrt(
-            get_hist1d(data=sorted_df[reco_var], weights=sorted_df.weights_mc, bins=bins)
-            * (projected_pot / mcbnb_pot)
-        )
-        pot_scale = projected_pot / mcbnb_pot
+        if data_df is not None:
+            if data_pot is None:
+                raise ValueError("data_pot must be provided when data_df is given")
+            data_hist = get_hist1d(data=ensure_lexsorted(data_df, axis=1)[reco_var], bins=bins)
+            data_err  = np.sqrt(data_hist)
+            pot_scale = data_pot / mcbnb_pot
+        else:
+            data_err = np.sqrt(
+                get_hist1d(data=sorted_df[reco_var], weights=sorted_df.weights_mc, bins=bins)
+                * (projected_pot / mcbnb_pot)
+            )
+            pot_scale = projected_pot / mcbnb_pot
         data_err_norm = float(np.sqrt(np.sum(data_err**2)))
 
         def _data_stat_row(cv):
@@ -614,6 +630,7 @@ def get_total_cov(reco_df, reco_var, bins, mcbnb_pot,
         rate_syst_df=rate_syst_df,
         rate_syst_dict=rate_syst_dict,
         mcbnb_pot=mcbnb_pot,
+        data_pot=data_pot,
         xsec_hist_cv=xsec_hist_cv if include_xsec else None,
         xsec_cov=xsec_total_cov if include_xsec else None,
         xsec_syst_df=xsec_syst_df if include_xsec else None,

@@ -116,6 +116,7 @@ class SystematicsOutput:
     rate_syst_df: pd.DataFrame
     rate_syst_dict: dict
     mcbnb_pot: float | None = None
+    data_pot: float | None = None
     xsec_hist_cv: np.ndarray | None = None
     xsec_cov: np.ndarray | None = None
     xsec_syst_df: pd.DataFrame | None = None
