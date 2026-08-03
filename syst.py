@@ -761,7 +761,9 @@ def get_syst_df(dicts: list, cv_hist: np.ndarray) -> pd.DataFrame:
         Columns: ``key``, ``category``, ``subcategory``, ``unc_diag``, ``unc_diag_avg``, ``unc_norm``, ``top5``.
         ``unc_diag``     — per-bin fractional uncertainty: sqrt(diag(cov)) / cv.
         ``unc_diag_avg`` — mean of ``unc_diag``; summary of per-bin shape uncertainty.
-        ``unc_norm``     — normalization fraction: sqrt(sum_ij cov[i,j]) / sum(cv).
+        ``unc_norm``     — normalization fraction: ``single_bin_unc / sum(cv)`` when present
+                          (xsec knobs use the response-matrix single-bin variance, which differs
+                          from ``sqrt(sum_ij cov[i,j])``); otherwise ``sqrt(sum_ij cov[i,j]) / sum(cv)``.
         Sorted by category then ``unc_norm`` (descending).
         ``top5`` flags the five largest sources per category.
     """
@@ -773,10 +775,11 @@ def get_syst_df(dicts: list, cv_hist: np.ndarray) -> pd.DataFrame:
             cov      = d[raw_key]['cov']
             unc_diag = np.sqrt(np.diag(cov)) / cv_hist
 
-            cov_sum = float(np.sum(cov))
-            if cov_sum < 0:
-                cov_sum = 0.0
-            unc_norm = float(np.sqrt(cov_sum) / N_tot) if N_tot > 0 else 0.0
+            if 'single_bin_unc' in d[raw_key]:
+                unc_norm = float(d[raw_key]['single_bin_unc']) / N_tot if N_tot > 0 else 0.0
+            else:
+                cov_sum = float(np.sum(cov))
+                unc_norm = float(np.sqrt(max(0.0, cov_sum)) / N_tot) if N_tot > 0 else 0.0
 
             category = _classify_category(raw_key)
             if category is None:

@@ -371,7 +371,7 @@ def get_intime_cov(selected_df, var, bins,
     # In-time cosmics are background events. When only signal events are counted
     # they contribute nothing, so the covariance is zero and dv_hist == rate_hist_cv.
     if event_type == "signal":
-        return np.zeros((rate_hist_cv.size, rate_hist_cv.size)), rate_hist_cv
+        return np.zeros((rate_hist_cv.size, rate_hist_cv.size)), rate_hist_cv, 0.0
 
     mcint_dfs = load_dfs(config.INTIME_FILE, ['histgenevtdf', 'nuecc'])
     scale = mcbnb_ngen / mcint_dfs['histgenevtdf'].TotalGenEvents.sum()
@@ -414,7 +414,15 @@ def get_intime_cov(selected_df, var, bins,
 
     cov_final = np.outer(unc_final * rate_hist_cv, unc_final * rate_hist_cv)
     dv_hist_conservative = rate_hist_cv * (1 + unc_final)
-    return cov_final, dv_hist_conservative
+
+    # Normalization sigma: compare total intime MC vs total offbeam events (both
+    # at mcbnb_pot units). This is variable-independent — the per-bin flooring
+    # used to build cov_final should not inflate the integrated normalization.
+    offbeam_total = float(np.sum(selected_fpw[~offbeam_mask]))
+    intime_total  = float(np.sum(mcint_fpw))
+    sigma_norm    = abs(intime_total - offbeam_total)
+
+    return cov_final, dv_hist_conservative, sigma_norm
     
 def get_total_cov(reco_df, reco_var, bins, mcbnb_pot,
                   cuts=None, projected_pot=1e20,
@@ -617,8 +625,9 @@ def get_total_cov(reco_df, reco_var, bins, mcbnb_pot,
 
     intime_cov = None
     intime_hists = None
+    intime_sigma_norm = None
     if include_cosmic and mcbnb_ngen is not None:
-        intime_cov, intime_hists = get_intime_cov(
+        intime_cov, intime_hists, intime_sigma_norm = get_intime_cov(
             selected_df=sorted_df, var=reco_var, bins=bins,
             mcbnb_ngen=mcbnb_ngen, mcbnb_pot=mcbnb_pot, threshold=intime_threshold,
             event_type=event_type, select_region=select_region, cuts=cuts, **select_kwargs,
@@ -662,11 +671,15 @@ def get_total_cov(reco_df, reco_var, bins, mcbnb_pot,
                                             key="NTargets", category="NTargets")
 
     if include_cosmic and intime_cov is not None:
+        _cv_rate = float(rate_hist_cv.sum())
+        _cv_xsec = float(xsec_hist_cv.sum()) if result.has_xsec else None
         result = add_uncertainty(
             result=result, cov=np.asarray(intime_cov, dtype=float),
             key="Cosmic", category="Cosmic",
             target="both" if result.has_xsec else "rate",
             hists=intime_hists[:, np.newaxis],
+            sum_value=intime_sigma_norm / _cv_rate if _cv_rate > 0 else 0.0,
+            sum_value_xsec=(intime_sigma_norm / _cv_xsec if _cv_xsec and _cv_xsec > 0 else 0.0) if result.has_xsec else None,
         )
 
     return result
