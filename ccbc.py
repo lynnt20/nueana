@@ -29,6 +29,7 @@ __all__ = [
     "nonsymmetric_cov",
     "get_ccbc_cov",
     "ccbc_cov_from_universes",
+    "ccbc_cov_from_outputs",
     "get_constrained_background",
     "plot_ccbc_summary",
     "plot_ccbc_fd_comparison",
@@ -507,6 +508,123 @@ def ccbc_cov_from_universes(
     cov_Ps_Bs_constr    = cov_Ps_Bs  - cov_Ps_nc @ pinv_nc @ cov_Bs_nc.T
     cov_ms_ms           = cov_Ps_Ps  + cov_Ps_Bs_constr + cov_Ps_Bs_constr.T + cov_Bs_Bs_constr
     cov_ns_ns           = cov_Ps_Ps  + cov_Ps_Bs        + cov_Ps_Bs.T        + cov_Bs_Bs
+    if data_stat_ns is not None:
+        cov_ms_ms = cov_ms_ms + data_stat_ns
+        cov_ns_ns = cov_ns_ns + data_stat_ns
+
+    return {
+        "cov_Ps_Ps":        cov_Ps_Ps,
+        "cov_Bs_Bs":        cov_Bs_Bs,
+        "cov_Bs_Bs_constr": cov_Bs_Bs_constr,
+        "cov_Ps_Bs":        cov_Ps_Bs,
+        "cov_Ps_Bs_constr": cov_Ps_Bs_constr,
+        "cov_Bs_nc":        cov_Bs_nc,
+        "cov_nc_nc":        cov_nc_nc,
+        "cov_ns_ns":        cov_ns_ns,
+        "cov_ms_ms":        cov_ms_ms,
+        "pinv_nc_nc":       pinv_nc,
+        "cv_bs":            cv_bs,
+        "cv_nc":            cv_nc,
+    }
+
+
+def ccbc_cov_from_outputs(
+    Ps_output: SystematicsOutput,
+    Bs_output: SystematicsOutput,
+    nc_output: SystematicsOutput,
+    allowed_keys: Sequence[str] = ("GENIE", "Flux", "Geant4", "MCstat"),
+    rcond: float = 1e-10,
+    data_stat_nc: np.ndarray | None = None,
+    data_stat_ns: np.ndarray | None = None,
+) -> dict:
+    """Build CCBC covariance blocks from SystematicsOutput objects (rate-level).
+
+    A rate-level alternative to :func:`ccbc_cov_from_universes` for use when
+    full :class:`~nueana.classes.SystematicsOutput` objects (from
+    :func:`~nueana.funcs.get_total_cov`) are available for the three regions.
+    Unlike :func:`get_ccbc_cov`, which uses ``xsec_syst_dict`` for the signal
+    component (Ps), this function uses ``rate_syst_dict`` for all three — making
+    it appropriate for rate-level plots such as :func:`~nueana.plotting.plot_mc_data_ccbc`.
+
+    DetVar entries are rescaled from ``events/sample_pot`` to events at
+    ``mcbnb_pot`` before covariance accumulation (same as in :func:`get_ccbc_cov`).
+    All three outputs must have been computed for the same variable and bins.
+
+    Parameters
+    ----------
+    Ps_output : SystematicsOutput
+        Full systematics for signal-only events in the signal region
+        (``event_type='signal'`` or ``mc_df[signal==0]``).
+        ``rate_syst_dict`` must contain universe histograms.
+    Bs_output : SystematicsOutput
+        Full systematics for background-only events in the signal region
+        (``event_type='background'`` or ``mc_df[signal!=0]``).
+    nc_output : SystematicsOutput
+        Full systematics for the sideband (control-region) sample
+        (``select_region='control'``).
+    allowed_keys : sequence of str
+        Systematic category names to include. Default: GENIE, Flux, Geant4, MCstat.
+    rcond : float
+        Regularisation cut-off for ``np.linalg.pinv(cov_nc_nc)``. Default 1e-10.
+    data_stat_nc : np.ndarray, shape (nbins, nbins), optional
+        Poisson data-statistical covariance on n_C; added to ``cov_nc_nc``
+        before the pseudoinverse to soften the constraint.
+    data_stat_ns : np.ndarray, shape (nbins, nbins), optional
+        Poisson data-statistical covariance on n_S; added to ``cov_ms_ms``.
+
+    Returns
+    -------
+    dict
+        Same keys as :func:`ccbc_cov_from_universes`: ``cov_Ps_Ps``,
+        ``cov_Bs_Bs``, ``cov_Bs_Bs_constr``, ``cov_Ps_Bs``,
+        ``cov_Ps_Bs_constr``, ``cov_Bs_nc``, ``cov_nc_nc``, ``cov_ns_ns``,
+        ``cov_ms_ms``, ``pinv_nc_nc``, ``cv_bs``, ``cv_nc``.
+        All covariances are in event-count² units at ``mcbnb_pot``.
+    """
+    _warn_key_mismatch(set(nc_output.rate_syst_dict), set(Bs_output.rate_syst_dict),
+                       "nc_output", "Bs_output")
+    _warn_key_mismatch(set(nc_output.rate_syst_dict), set(Ps_output.rate_syst_dict),
+                       "nc_output", "Ps_output")
+
+    cv_ps = np.asarray(Ps_output.rate_hist_cv, dtype=float)
+    cv_bs = np.asarray(Bs_output.rate_hist_cv, dtype=float)
+    cv_nc = np.asarray(nc_output.rate_hist_cv, dtype=float)
+    nbins = len(cv_nc)
+
+    cov_Ps_Ps = np.zeros((nbins, nbins))
+    cov_Bs_Bs = np.zeros((nbins, nbins))
+    cov_nc_nc = np.zeros((nbins, nbins))
+    cov_Ps_Bs = np.zeros((nbins, nbins))
+    cov_Ps_nc = np.zeros((nbins, nbins))
+    cov_Bs_nc = np.zeros((nbins, nbins))
+
+    for key in _iter_shared_keys(nc_output.rate_syst_dict, Bs_output.rate_syst_dict,
+                                  allowed_keys, extra_dict=Ps_output.rate_syst_dict):
+        ps_h  = np.asarray(Ps_output.rate_syst_dict[key]["hists"])
+        bs_h  = np.asarray(Bs_output.rate_syst_dict[key]["hists"])
+        nc_h  = np.asarray(nc_output.rate_syst_dict[key]["hists"])
+        ps_cv = np.asarray(Ps_output.rate_syst_dict[key].get("hist_cv", cv_ps))
+        bs_cv = np.asarray(Bs_output.rate_syst_dict[key].get("hist_cv", cv_bs))
+        nc_cv = np.asarray(nc_output.rate_syst_dict[key].get("hist_cv", cv_nc))
+
+        ps_h, ps_cv = _rescale_detvar(ps_h, ps_cv, Ps_output, key)
+        bs_h, bs_cv = _rescale_detvar(bs_h, bs_cv, Bs_output, key)
+        nc_h, nc_cv = _rescale_detvar(nc_h, nc_cv, nc_output, key)
+
+        cov_Ps_Ps += nonsymmetric_cov(ps_h, ps_cv, ps_h, ps_cv)
+        cov_Bs_Bs += nonsymmetric_cov(bs_h, bs_cv, bs_h, bs_cv)
+        cov_nc_nc += nonsymmetric_cov(nc_h, nc_cv, nc_h, nc_cv)
+        cov_Ps_Bs += nonsymmetric_cov(ps_h, ps_cv, bs_h, bs_cv)
+        cov_Ps_nc += nonsymmetric_cov(ps_h, ps_cv, nc_h, nc_cv)
+        cov_Bs_nc += nonsymmetric_cov(bs_h, bs_cv, nc_h, nc_cv)
+
+    cov_nc_nc_sym        = (cov_nc_nc + cov_nc_nc.T) / 2
+    cov_nc_nc_pinv_input = cov_nc_nc_sym + (data_stat_nc if data_stat_nc is not None else 0.0)
+    pinv_nc              = np.linalg.pinv(cov_nc_nc_pinv_input, rcond=rcond)
+    cov_Bs_Bs_constr     = cov_Bs_Bs  - cov_Bs_nc @ pinv_nc @ cov_Bs_nc.T
+    cov_Ps_Bs_constr     = cov_Ps_Bs  - cov_Ps_nc @ pinv_nc @ cov_Bs_nc.T
+    cov_ms_ms            = cov_Ps_Ps  + cov_Ps_Bs_constr + cov_Ps_Bs_constr.T + cov_Bs_Bs_constr
+    cov_ns_ns            = cov_Ps_Ps  + cov_Ps_Bs        + cov_Ps_Bs.T        + cov_Bs_Bs
     if data_stat_ns is not None:
         cov_ms_ms = cov_ms_ms + data_stat_ns
         cov_ns_ns = cov_ns_ns + data_stat_ns

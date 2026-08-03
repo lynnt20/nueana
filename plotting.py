@@ -140,11 +140,11 @@ def annotate_chisq(
     """
     if not np.isfinite(chisq):
         return
-    p_str = f"{chi2_dist.sf(chisq, ndof):.2g}" if chi2_dist is not None else "N/A"
+    p_str = f"{chi2_dist.sf(chisq, ndof):.3g}" if chi2_dist is not None else "N/A"
     kwargs.setdefault('zorder', _TEXT_ZORDER)
     kwargs.setdefault('bbox', dict(boxstyle='round,pad=0.1', facecolor='white', edgecolor='none', alpha=0.5))
     ax.annotate(
-        rf"$\chi^2$/ndf = {chisq:.1f}/{ndof}, $p$ = {p_str}",
+        rf"$\chi^2$/ndf = {chisq:.2f}/{ndof}, $p$ = {p_str}",
         xy=xy,
         xycoords=xycoords,
         ha=ha,
@@ -825,8 +825,8 @@ def plot_mc_data(mc_df: pd.DataFrame,
     if annot:
         ann_lines = [rf"$\Sigma$ Data/Pred = {total_ratio:.2f} $\pm$ {total_ratio_stat_err:.2f} (stat.) $\pm$ {total_ratio_syst_err:.2f} (syst.)"]
         if np.isfinite(chi2):
-            p_str = f"{chi2_dist.sf(chi2, ndf):.2g}" if chi2_dist is not None else "N/A"
-            ann_lines.append(rf"$\chi^2$/ndf = {chi2:.1f}/{ndf}, $p$ = {p_str}")
+            p_str = f"{chi2_dist.sf(chi2, ndf):.3g}" if chi2_dist is not None else "N/A"
+            ann_lines.append(rf"$\chi^2$/ndf = {chi2:.2f}/{ndf}, $p$ = {p_str}")
         ax_main.annotate(
             "\n".join(ann_lines),
             xy=(ann_x, ann_y),
@@ -879,6 +879,9 @@ def plot_mc_data_ccbc(
     side_var: str | tuple,
     ccbc_cov: dict | None = None,
     allowed_keys: tuple = ("GENIE", "Flux", "Geant4", "MCstat"),
+    Ps_output: SystematicsOutput | None = None,
+    Bs_output: SystematicsOutput | None = None,
+    nc_output: SystematicsOutput | None = None,
     scale: float = 1.0,
     overflow: bool = True,
     figsize: tuple[int, int] = (7, 6),
@@ -928,12 +931,28 @@ def plot_mc_data_ccbc(
     side_var : str or tuple
         Variable to histogram in the sideband DataFrames.
     ccbc_cov : dict, optional
-        Pre-computed output of :func:`~nueana.ccbc.ccbc_cov_from_universes`.
-        When supplied, the sideband universe histograms are not recomputed —
-        pass this when looping over many signal-region variables so the sideband
-        work is done once.
+        Pre-computed output of :func:`~nueana.ccbc.ccbc_cov_from_universes` or
+        :func:`~nueana.ccbc.ccbc_cov_from_outputs`. When supplied, no CCBC
+        recomputation is done regardless of whether ``Ps/Bs/nc_output`` are also
+        given — pass this when looping over many signal-region variables so the
+        sideband work is done once.
     allowed_keys : tuple of str
-        Systematic categories forwarded to :func:`~nueana.ccbc.ccbc_cov_from_universes`.
+        Systematic categories forwarded to the CCBC covariance function.
+    Ps_output : SystematicsOutput, optional
+        Full systematics for signal-only events in the signal region from
+        :func:`~nueana.funcs.get_total_cov` (e.g. ``event_type='signal'``).
+        When all three of ``Ps_output``, ``Bs_output``, and ``nc_output`` are
+        provided and ``ccbc_cov`` is None, :func:`~nueana.ccbc.ccbc_cov_from_outputs`
+        is called instead of the universe-histogram path — enabling detector
+        variations and normalisation uncertainties to enter the CCBC constraint.
+        The ``rate_hist_cv`` on each output is also used as the CV histogram,
+        overriding the computation from ``mc_df`` / ``side_mc_df``.
+    Bs_output : SystematicsOutput, optional
+        Full systematics for background-only events in the signal region
+        (e.g. ``event_type='background'``).
+    nc_output : SystematicsOutput, optional
+        Full systematics for the sideband (control-region) sample
+        (e.g. ``select_region='control'``).
     scale : float, default 1.0
         Multiplicative scale applied to all histograms and covariances
         (use ``projected_pot / mcbnb_pot`` to move onto a target POT).
@@ -985,29 +1004,43 @@ def plot_mc_data_ccbc(
         bins=bins, overflow=overflow,
     )
 
-    # Build CCBC covariance — reuse cached sideband if supplied.
+    # Override CV histograms from output objects when provided.
+    _use_outputs = (Ps_output is not None and Bs_output is not None and nc_output is not None)
+    if _use_outputs:
+        cv_ps = np.asarray(Ps_output.rate_hist_cv, dtype=float)
+        cv_bs = np.asarray(Bs_output.rate_hist_cv, dtype=float)
+
+    # Build CCBC covariance — reuse cached dict if supplied; otherwise compute from
+    # outputs (full syst) or universe columns in mc_df (GENIE+Flux+G4+MCstat only).
+    _data_nc_raw = get_hist1d(data=side_data_df[side_var], bins=bins, overflow=overflow)
+    data_stat_nc = np.diag(_data_nc_raw / scale)
     if ccbc_cov is None:
-        from .syst import get_syst_hists
-        syst_ps_h, _ = get_syst_hists(mc_df[sig_mask],  var,      bins)
-        syst_bs_h, _ = get_syst_hists(mc_df[bkg_mask],  var,      bins)
-        syst_nc_h, _ = get_syst_hists(side_mc_df,       side_var, bins)
-        cv_nc = get_hist1d(
-            data=side_mc_df[side_var],
-            weights=side_mc_df[_side_weight_col] if _side_weight_col else None,
-            bins=bins, overflow=overflow,
-        )
-        # data_stat_nc must be in mcbnb_pot units (same as cov_nc_nc).
-        # Raw data counts are at data_pot; dividing by scale converts to mcbnb_pot.
-        # Poisson variance of (data_nc / scale) is also data_nc / scale.
-        _data_nc_raw = get_hist1d(data=side_data_df[side_var], bins=bins, overflow=overflow)
-        data_stat_nc = np.diag(_data_nc_raw / scale)
-        ccbc_cov = ccbc_cov_from_universes(
-            syst_ps_h, cv_ps,
-            syst_bs_h, cv_bs,
-            syst_nc_h, cv_nc,
-            allowed_keys=allowed_keys,
-            data_stat_nc=data_stat_nc,
-        )
+        if _use_outputs:
+            from .ccbc import ccbc_cov_from_outputs
+            ccbc_cov = ccbc_cov_from_outputs(
+                Ps_output, Bs_output, nc_output,
+                allowed_keys=allowed_keys,
+                data_stat_nc=data_stat_nc,
+            )
+        else:
+            from .syst import get_syst_hists
+            syst_ps_h, _ = get_syst_hists(mc_df[sig_mask],  var,      bins)
+            syst_bs_h, _ = get_syst_hists(mc_df[bkg_mask],  var,      bins)
+            syst_nc_h, _ = get_syst_hists(side_mc_df,       side_var, bins)
+            cv_nc = get_hist1d(
+                data=side_mc_df[side_var],
+                weights=side_mc_df[_side_weight_col] if _side_weight_col else None,
+                bins=bins, overflow=overflow,
+            )
+            # data_stat_nc must be in mcbnb_pot units (same as cov_nc_nc).
+            # Raw data counts are at data_pot; dividing by scale converts to mcbnb_pot.
+            ccbc_cov = ccbc_cov_from_universes(
+                syst_ps_h, cv_ps,
+                syst_bs_h, cv_bs,
+                syst_nc_h, cv_nc,
+                allowed_keys=allowed_keys,
+                data_stat_nc=data_stat_nc,
+            )
 
     # Pass data in mcbnb_pot units so (data_nc - cv_nc) is a meaningful residual.
     # constrained_bkg is returned in mcbnb_pot units; bkg_hist = constrained_bkg * scale
@@ -1022,10 +1055,14 @@ def plot_mc_data_ccbc(
         bins=bins, overflow=overflow,
     )
 
-    # Full covariance: cov_ms_ms (syst, already contains signal+bkg blocks)
-    # plus diagonal MC stat.
+    # Full covariance: when using outputs, MCstat is already incorporated via
+    # rate_syst_dict, so cov_ms_ms is the complete covariance. For the universe
+    # path (systs=True), add diagonal MC stat separately.
     cov_ms_ms = np.asarray(ccbc_cov["cov_ms_ms"]) * scale ** 2
-    total_cov = cov_ms_ms + np.diag(mc_stat_var) * scale ** 2
+    if _use_outputs:
+        total_cov = cov_ms_ms
+    else:
+        total_cov = cov_ms_ms + np.diag(mc_stat_var) * scale ** 2
     total_err = np.sqrt(np.clip(np.diag(total_cov), 0.0, None))
 
     # --- Draw ---
@@ -1065,10 +1102,12 @@ def plot_mc_data_ccbc(
                          edgecolor=mpl.colors.to_rgba(signal_color, 1.0),
                          lw=1.5, label=signal_label)
 
+    _err_label = ("MC stat.+syst. (w/ CCBC)" if _use_outputs
+                  else "MC stat.+syst.\n(GENIE+Flux+G4, w/ CCBC)")
     _draw_step_band(ax_main, bins, total_err, center=tot_step,
                     color=mpl.colors.to_rgba("gray", 0.75),
                     lw=0.0, facecolor="none", hatch="xxx",
-                    label="MC stat.+syst.\n(GENIE+Flux+G4, w/ CCBC)")
+                    label=_err_label)
 
     # Data overlay.
     data_hist   = get_hist1d(data=data_df[var], bins=bins, overflow=overflow)
@@ -1126,15 +1165,19 @@ def plot_mc_data_ccbc(
             _data_stat_err  = np.sqrt(total_data) / total_mc
             _mc_stat_err    = np.sqrt(np.sum(mc_stat_var)) * scale * _prop
             _ratio_stat_err = np.sqrt(_data_stat_err ** 2 + _mc_stat_err ** 2)
-            _ratio_syst_err = np.sqrt(max(0.0, float(np.sum(cov_ms_ms)))) * _prop
+            # For outputs path cov_ms_ms includes MCstat; subtract it to get syst-only.
+            _syst_sum = float(np.sum(cov_ms_ms))
+            if _use_outputs:
+                _syst_sum = max(0.0, _syst_sum - float(np.sum(mc_stat_var)) * scale ** 2)
+            _ratio_syst_err = np.sqrt(max(0.0, _syst_sum)) * _prop
             ann_lines.append(
                 rf"$\Sigma$ Data/Pred = {total_ratio:.4f}"
                 rf" $\pm$ {_ratio_stat_err:.2f} (stat.)"
                 rf" $\pm$ {_ratio_syst_err:.2f} (syst.)"
             )
         if np.isfinite(chi2):
-            p_str = (f"{chi2_dist.sf(chi2, nbins):.2g}" if chi2_dist is not None else "N/A")
-            ann_lines.append(rf"$\chi^2$/ndf = {chi2:.1f}/{nbins}, $p$ = {p_str}")
+            p_str = (f"{chi2_dist.sf(chi2, nbins):.3g}" if chi2_dist is not None else "N/A")
+            ann_lines.append(rf"$\chi^2$/ndf = {chi2:.2f}/{nbins}, $p$ = {p_str}")
 
     _var_str = var if isinstance(var, str) else '_'.join(str(v) for v in var)
     ax_sub.set_xlabel(_var_str if xlabel == "" else xlabel, fontsize=12)

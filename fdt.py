@@ -417,13 +417,14 @@ def plot_unfolded_result(
     norm_band_label: str = "norm. uncertainty",
     data_label: str = "unfolded (fake) data",
     ylabel: str | None = None,
+    stat_cov: np.ndarray | None = None,
 ) -> dict:
     """Plot an unfolded measurement with smeared-truth overlays and a normalisation band.
 
     Parameters
     ----------
     result : dict
-        WienerSVD output with 'unfold', 'UnfoldCov', 'AddSmear', 'xsec_scale'.
+        WienerSVD output with 'unfold', 'UnfoldCov', 'AddSmear', 'WF', 'xsec_scale'.
         Truths must be in absolute event-count units at mcbnb_pot (not pre-scaled).
     var : VariableConfig
         Provides bin edges, display labels, and axis label pieces.
@@ -445,6 +446,11 @@ def plot_unfolded_result(
         Legend label for the unfolded errorbar.
     ylabel : str, optional
         Y-axis label. None derives a dσ/d<var> label; empty string skips it.
+    stat_cov : np.ndarray or None, optional
+        Pre-unfolding statistical covariance in event-count² units at mcbnb_pot (e.g.
+        ``data_stat_energy`` passed as ``extra_cov`` to ``unfold()``).  When provided,
+        the errorbar is split: an inner bar (stat-only, with caps) and an outer bar
+        (stat+syst, no caps).  When None a single total-error bar is drawn.
 
     Returns
     -------
@@ -469,12 +475,24 @@ def plot_unfolded_result(
     if truth_colors is None:
         truth_colors = {}
 
-    # Unfolded data point with diagonal errors
-    ax.errorbar(
-        centers, unfold / widths,
-        yerr=np.sqrt(np.diag(cov)) / widths,
-        fmt='k.', label=data_label,
-    )
+    # Unfolded data point — one bar (total) or two bars (stat / stat+syst)
+    y          = unfold / widths
+    total_err  = np.sqrt(np.clip(np.diag(cov), 0.0, None)) / widths
+    if stat_cov is not None:
+        # CovRotation is the full (n_true x n_reco) unfolding operator; WF is
+        # only the 1D diagonal factors in SVD space and cannot be used directly.
+        cov_rot = np.asarray(result['CovRotation'])
+        stat_unfolded_cov = cov_rot @ (np.asarray(stat_cov) * xsec_scale ** 2) @ cov_rot.T
+        stat_err = np.sqrt(np.clip(np.diag(stat_unfolded_cov), 0.0, None)) / widths
+        # Outer bar: total (stat+syst), thin line with caps
+        ax.errorbar(centers, y, yerr=total_err,
+                    fmt='k.', capsize=4, lw=1, capthick=1)
+        # Inner bar: stat-only, thicker line — dominates the overlap region
+        # so the subpixel misalignment between the two lw values is invisible
+        ax.errorbar(centers, y, yerr=stat_err,
+                    fmt='k.', capsize=2, lw=1, capthick=1, label=data_label)
+    else:
+        ax.errorbar(centers, y, yerr=total_err, fmt='k.', label=data_label)
 
     # Truth overlays
     chisqs: dict[str, float] = {}
