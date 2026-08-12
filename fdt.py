@@ -32,6 +32,16 @@ __all__ = [
 _DEFAULT_TRUTH_COLORS = ["C0", "yellowgreen", "C3", "C4", "C5"]
 
 
+def _xsec_ylabel(var: VariableConfig) -> str:
+    """dσ/d<var> axis label in cm²·nucleon⁻¹ units."""
+    plot_math = var.var_plot_name.strip("$")
+    unit_part = rf"\,\mathrm{{{var.var_unit}}}^{{-1}}" if var.var_unit else ""
+    return (
+        rf"$d\sigma / d{plot_math}$ "
+        rf"$[\mathrm{{cm}}^2{unit_part}\,\mathrm{{nucleon}}^{{-1}}]$"
+    )
+
+
 # ---------------------------------------------------------------------------
 
 
@@ -64,11 +74,21 @@ class UnfoldInput:
     mcbnb_pot : float
         Nominal POT of the MC sample; used to compute the default xsec_scale
         in :meth:`unfold` so the unfolded result is in cm²·nucleon⁻¹.
+    syst_covs_1bin : dict of str -> np.ndarray or None
+        Pre-built 1×1 covariance matrices for single-bin unfolding, keyed by
+        the same names as ``syst_covs``.  For xsec (GENIE) knobs these are
+        derived from the response-matrix single-bin variance computed in
+        ``get_syst_hists`` — not from ``sum(syst_covs[k])``, which would
+        integrate the multi-bin smeared covariance and give a different result.
+        Populated automatically by :meth:`build` from ``single_bin_unc`` in
+        ``xsec_syst_dict``.  When None, :meth:`integrate` falls back to
+        ``sum(C)`` for all keys.
     """
-    response:  np.ndarray
-    cv_signal: np.ndarray
-    syst_covs: dict
-    mcbnb_pot: float
+    response:       np.ndarray
+    cv_signal:      np.ndarray
+    syst_covs:      dict
+    mcbnb_pot:      float
+    syst_covs_1bin: dict | None = None
 
     def unfold(
         self,
@@ -110,7 +130,9 @@ class UnfoldInput:
         -------
         dict
             WienerSVD output with keys 'unfold', 'AddSmear', 'WF', 'UnfoldCov',
-            'CovRotation', and 'xsec_scale'.
+            'CovRotation', and 'xsec_scale'.  Note: 'WF' is a 1-D array of
+            per-singular-value filter factors, not a 2-D operator.  Use
+            'CovRotation' to propagate covariances through the unfolding.
         """
         if xsec_scale is None:
             xsec_scale = 1.0 / (integrated_flux * self.mcbnb_pot * NTARGETS)
@@ -190,11 +212,21 @@ class UnfoldInput:
             for k, entry in syst_output.xsec_syst_dict.items()
         }
 
+        # For xsec (GENIE) knobs, single_bin_unc was computed by running the
+        # response-matrix method at n_bins=1 in get_syst_hists — this is the
+        # correct integrated variance, not sum(multi-bin cov).
+        syst_covs_1bin = {
+            k: np.array([[entry['single_bin_unc'] ** 2]])
+            for k, entry in syst_output.xsec_syst_dict.items()
+            if 'single_bin_unc' in entry
+        } or None
+
         return cls(
             response=response,
             cv_signal=cv_signal,
             syst_covs=syst_covs,
             mcbnb_pot=syst_output.mcbnb_pot,
+            syst_covs_1bin=syst_covs_1bin,
         )
 
     def integrate(self) -> UnfoldInput:
@@ -206,16 +238,26 @@ class UnfoldInput:
 
             eff = sum(R @ cv_signal) / sum(cv_signal)
 
-        Each per-key covariance is collapsed as ``1ᵀ C 1 = sum(C)``.  The
-        returned object can be passed directly to :meth:`unfold` with a 1-element
-        ``measure`` array and a 1×1 ``total_cov``.
+        For each key, the 1×1 covariance is taken from ``syst_covs_1bin`` when
+        available (correct for xsec/GENIE knobs, where the response-matrix
+        single-bin variance differs from ``sum(C)``).  Keys absent from
+        ``syst_covs_1bin`` fall back to ``1ᵀ C 1 = sum(C)``.
+
+        The returned object can be passed directly to :meth:`unfold` with a
+        1-element ``measure`` array and a 1×1 ``total_cov``.
         """
         total_true = float(np.sum(self.cv_signal))
         eff = float(np.sum(self.response @ self.cv_signal)) / total_true
+        covs_1bin = {}
+        for k, c in self.syst_covs.items():
+            if self.syst_covs_1bin is not None and k in self.syst_covs_1bin:
+                covs_1bin[k] = self.syst_covs_1bin[k]
+            else:
+                covs_1bin[k] = np.array([[np.sum(c)]])
         return UnfoldInput(
             response=np.array([[eff]]),
             cv_signal=np.array([total_true]),
-            syst_covs={k: np.array([[np.sum(c)]]) for k, c in self.syst_covs.items()},
+            syst_covs=covs_1bin,
             mcbnb_pot=self.mcbnb_pot,
         )
 
@@ -282,7 +324,6 @@ def make_fake_data_hists(
     reco_mask: np.ndarray,
     true_mask: np.ndarray,
     weight: float,
-    mcbnb_pot: float,
     side_df: pd.DataFrame | None = None,
     ccbc_cov: dict | None = None,
     side_mask: np.ndarray | None = None,
@@ -317,9 +358,6 @@ def make_fake_data_hists(
         Events in true_df to reweight.
     weight : float
         Multiplicative scale applied to masked events.
-    mcbnb_pot : float
-        Total POT of the MC sample (e.g. from
-        ``syst_output.mcbnb_pot``).  Used to flux-average all histograms.
     side_df : pd.DataFrame or None, optional
         Control-region (sideband) sample with ``weights_mc``.  Required when
         using CCBC constraint.
@@ -449,8 +487,9 @@ def plot_unfolded_result(
     stat_cov : np.ndarray or None, optional
         Pre-unfolding statistical covariance in event-count² units at mcbnb_pot (e.g.
         ``data_stat_energy`` passed as ``extra_cov`` to ``unfold()``).  When provided,
-        the errorbar is split: an inner bar (stat-only, with caps) and an outer bar
-        (stat+syst, no caps).  When None a single total-error bar is drawn.
+        the errorbar is split: an outer bar (stat+syst, larger caps, thin line)
+        and an inner bar (stat-only, smaller caps, carries the legend label).
+        When None a single total-error bar is drawn.
 
     Returns
     -------
@@ -505,7 +544,7 @@ def plot_unfolded_result(
             _DEFAULT_TRUTH_COLORS[i % len(_DEFAULT_TRUTH_COLORS)],
         )
         ax.stairs(
-            smeared / widths, bins, lw=2, color=color,
+            smeared / widths, bins, lw=1.5, color=color, alpha=0.9,
             label=chisq_label_fmt(label, chisq, nbins),
         )
 
@@ -516,25 +555,18 @@ def plot_unfolded_result(
         cov_norm, cov_shape = decompose_cov(cov, ref_smear)
         ax.stairs(
             np.diag(np.sqrt(cov_norm)) / widths, bins,
-            fill=True, color='gray', alpha=0.5,
+            fill=True, color='gray', alpha=0.3,
             label=norm_band_label if norm_band_label else None,
         )
 
     ax.set_xticks(bins)
     ax.set_xticklabels(var.bin_labels)
-    ax.set_xlabel(var.var_labels[0],fontsize=12)
+    ax.set_xlabel(var.var_labels[0],fontsize=8)
     if ylabel is None:
-        plot_math = var.var_plot_name.strip("$")
-        unit_part = (
-            rf"\,\mathrm{{{var.var_unit}}}^{{-1}}" if var.var_unit else ""
-        )
-        ylabel = (
-            rf"$d\sigma / d{plot_math}$ "
-            rf"$[\mathrm{{cm}}^2{unit_part}\,\mathrm{{nucleon}}^{{-1}}]$"
-        )
+        ylabel = _xsec_ylabel(var,)
     if ylabel:
-        ax.set_ylabel(ylabel,fontsize=12)
-    ax.legend()
+        ax.set_ylabel(ylabel, fontsize=8)
+    ax.legend(frameon=False,fontsize=7)
 
     return {
         "ax":        ax,
@@ -694,7 +726,7 @@ def run_random_background_fdt(
         unf_input_1bin.unfold(wienersvd_fn, measure=_zero_1, total_cov=cov_pre_1bin)["UnfoldCov"][0, 0]
     ))
 
-    itr: range | object = range(n_trials)
+    itr = range(n_trials)
     if show_progress:
         try:
             from tqdm import tqdm
@@ -837,7 +869,6 @@ def plot_random_background_fdt(
     axes = axes.reshape(-1, 2)   # uniform (n_rows, 2) indexing
     ax_pval, ax_xsec = axes[0]
 
-    n       = len(result_df)
     xsec_cv = float(result_df["xsec_cv"].iloc[0])
 
     # ── Row 0 left: p-value histogram ──────────────────────────────────────
@@ -862,11 +893,9 @@ def plot_random_background_fdt(
     ax_xsec.hist(result_df["xsec_constr"], bins=bins_x, alpha=0.7,              color="purple", label=rf"constrained  $\pm1\sigma$ ({xsec_err_constr:.2e})")
     ax_xsec.axvline(xsec_cv, color="k", ls="--", lw=1.2, label="CV")
     ax_xsec.axvspan(xsec_cv - xsec_err_uncon,  xsec_cv + xsec_err_uncon,
-                    alpha=0.10, color="gray",)
-                    # label=rf"unconstrained $\pm1\sigma$ ({xsec_err_uncon:.2e})")
+                    alpha=0.10, color="gray")
     ax_xsec.axvspan(xsec_cv - xsec_err_constr, xsec_cv + xsec_err_constr,
-                    alpha=0.20, color="purple",)
-                    # label=rf"constrained $\pm1\sigma$ ({xsec_err_constr:.2e})")
+                    alpha=0.20, color="purple")
     ax_xsec.set_xlabel(r"Total $\sigma$ [cm$^2$ nucleon$^{-1}$]")
     ax_xsec.set_ylabel("Trials")
     ax_xsec.set_title("Single-Bin cross-section")
@@ -878,12 +907,7 @@ def plot_random_background_fdt(
         centers = var.bin_centers
         widths  = np.diff(bins_v)
 
-        plot_math = var.var_plot_name.strip("$")
-        unit_part = rf"\,\mathrm{{{var.var_unit}}}^{{-1}}" if var.var_unit else ""
-        ylabel = (
-            rf"$d\sigma / d{plot_math}$ "
-            rf"$[\mathrm{{cm}}^2{unit_part}\,\mathrm{{nucleon}}^{{-1}}]$"
-        )
+        ylabel = _xsec_ylabel(var)
 
         all_unfold_uncon  = np.stack(result_df["unfold_uncon"].values)   # (n_trials, nbins)
         all_unfold_constr = np.stack(result_df["unfold_constr"].values)
