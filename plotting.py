@@ -75,6 +75,64 @@ def _clipped_minor_locator(xmin, xmax):
     return _L()
 
 
+def _annotate_below_legend(
+    fig: plt.Figure,
+    ax: plt.Axes,
+    text: str,
+    legend_loc: str = "",
+) -> None:
+    """Place text just below the legend bounding box, anchored to its left or right edge.
+
+    Renders the canvas to obtain the legend extent. ``legend_loc`` should be the
+    lower-cased ``'loc'`` string from the legend kwargs so the anchor side can be
+    inferred without reading the bounding box.
+    """
+    fig.canvas.draw()
+    leg = ax.get_legend()
+    if leg is not None:
+        renderer     = fig.canvas.get_renderer()
+        legend_box   = leg.get_window_extent(renderer).transformed(ax.transAxes.inverted())
+        ann_fontsize = leg.get_texts()[0].get_fontsize() if leg.get_texts() else 'small'
+    else:
+        legend_box, ann_fontsize = None, 'small'
+
+    if 'right' in legend_loc:
+        anchor_right = True
+    elif 'left' in legend_loc or 'center' in legend_loc:
+        anchor_right = False
+    else:
+        anchor_right = legend_box is not None and legend_box.x0 > 0.5
+
+    if legend_box is not None:
+        ann_x = legend_box.x1 if anchor_right else legend_box.x0
+        ann_y = legend_box.y0
+    else:
+        ann_x, ann_y = (0.98, 0.98) if anchor_right else (0.02, 0.98)
+    ann_ha = 'right' if anchor_right else 'left'
+
+    ax.annotate(
+        text,
+        xy=(ann_x, ann_y),
+        xycoords=ax.transAxes,
+        xytext=(0, -6),
+        textcoords='offset points',
+        ha=ann_ha, va='top', fontsize=ann_fontsize,
+        zorder=_TEXT_ZORDER,
+        bbox=dict(boxstyle='round,pad=0.2', facecolor='white', edgecolor='none', alpha=0.5),
+    )
+
+
+def _reorder_legend_data_first(ax: plt.Axes, leg_kw: dict) -> None:
+    """Move the 'data' legend entry to the front without changing other order."""
+    handles, labels = ax.get_legend_handles_labels()
+    idx = next((i for i, l in enumerate(labels) if l.lower().startswith('data')), None)
+    if idx is not None and idx != 0:
+        order = [idx] + [i for i in range(len(labels)) if i != idx]
+        ax.legend(
+            [handles[i] for i in order], [labels[i] for i in order], **leg_kw
+        ).set_zorder(_TEXT_ZORDER)
+
+
 def _draw_step_band(
     ax: plt.Axes,
     bins: np.ndarray,
@@ -159,7 +217,7 @@ def plot_var(indf: pd.DataFrame,
              ax = None,
              config: PlottingConfig | None = None,
              **kwargs,
-             ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+             ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict]:
     """Plot a variable as stacked histograms, selectable by category type.
 
     Category mode is controlled by ``generic``, ``pdg``, and ``mode`` (checked in
@@ -304,7 +362,7 @@ def plot_var(indf: pd.DataFrame,
     systs_err   = np.zeros(len(bins)-1)
     total_cov   = np.zeros((len(bins)-1, len(bins)-1))
 
-    if (pdg==False) & (mode==False):
+    if not pdg and not mode:
         for i, (key, entry) in enumerate(categories.items()):
             vals = entry["values"] if "values" in entry else [entry["value"]]
             mask = indf.signal.isin(vals)
@@ -330,7 +388,7 @@ def plot_var(indf: pd.DataFrame,
                 hists[i] = get_hist1d(data=this_other[var],
                                       weights=this_other[_weight_col] if _weight_col is not None else None,
                                       bins=bins, overflow=overflow)
-    else:
+    elif pdg:
         process_col = tuple(list(pdg_col)[:-1] + ['start_process'])
         # other_df stores any particles that we don't specify the pdg of
         this_nu_df      = indf[indf.signal <  signal_dict['cosmic']]#.sort_index()
@@ -798,45 +856,13 @@ def plot_mc_data(mc_df: pd.DataFrame,
         except np.linalg.LinAlgError:
             chi2 = np.nan
 
-    fig.canvas.draw()
-    legend_loc  = str((_p.get('legend_kwargs') or {}).get('loc', '')).lower()
-    main_legend = ax_main.get_legend()
-
-    if main_legend is not None:
-        renderer   = fig.canvas.get_renderer()
-        legend_box = main_legend.get_window_extent(renderer).transformed(ax_main.transAxes.inverted())
-        ann_fontsize = main_legend.get_texts()[0].get_fontsize() if main_legend.get_texts() else 'small'
-    else:
-        legend_box, ann_fontsize = None, 'small'
-
-    if 'right' in legend_loc:
-        anchor_right = True
-    elif 'left' in legend_loc or 'center' in legend_loc:
-        anchor_right = False
-    else:
-        anchor_right = legend_box is not None and legend_box.x0 > 0.5
-
-    if legend_box is not None:
-        ann_x, ann_y = (legend_box.x1 if anchor_right else legend_box.x0), legend_box.y0
-    else:
-        ann_x, ann_y = (0.98, 0.98) if anchor_right else (0.02, 0.98)
-    ann_ha = 'right' if anchor_right else 'left'
-
     if annot:
         ann_lines = [rf"$\Sigma$ Data/Pred = {total_ratio:.2f} $\pm$ {total_ratio_stat_err:.2f} (stat.) $\pm$ {total_ratio_syst_err:.2f} (syst.)"]
         if np.isfinite(chi2):
             p_str = f"{chi2_dist.sf(chi2, ndf):.3g}" if chi2_dist is not None else "N/A"
             ann_lines.append(rf"$\chi^2$/ndf = {chi2:.2f}/{ndf}, $p$ = {p_str}")
-        ax_main.annotate(
-            "\n".join(ann_lines),
-            xy=(ann_x, ann_y),
-            xycoords=ax_main.transAxes,
-            xytext=(0, -6),
-            textcoords='offset points',
-            ha=ann_ha, va='top', fontsize=ann_fontsize,
-            zorder=_TEXT_ZORDER,
-            bbox=dict(boxstyle='round,pad=0.2', facecolor='white', edgecolor='none', alpha=0.5),
-        )
+        _legend_loc = str((_p.get('legend_kwargs') or {}).get('loc', '')).lower()
+        _annotate_below_legend(fig, ax_main, "\n".join(ann_lines), legend_loc=_legend_loc)
 
     if bin_labels is not None:
         ax_main.set_xticks(bins)
@@ -853,13 +879,9 @@ def plot_mc_data(mc_df: pd.DataFrame,
         ax_main.set_ylim(top=ax_main.get_ylim()[1] * ylim_scale)
 
     if data_first:
-        handles, labels = ax_main.get_legend_handles_labels()
-        idx = next((i for i, l in enumerate(labels) if l.startswith('data')), None)
-        if idx is not None and idx != 0:
-            order = [idx] + [i for i in range(len(labels)) if i != idx]
-            _leg_kw = {'ncol': 2, 'loc': 'upper right'}
-            _leg_kw.update(_p.get('legend_kwargs') or {})
-            ax_main.legend([handles[i] for i in order], [labels[i] for i in order], **_leg_kw).set_zorder(_TEXT_ZORDER)
+        _leg_kw = {'ncol': 2, 'loc': 'upper right'}
+        _leg_kw.update(_p.get('legend_kwargs') or {})
+        _reorder_legend_data_first(ax_main, _leg_kw)
 
     annotate_sbnd(ax_main, internal=_p.get('internal', True))
 
@@ -885,6 +907,9 @@ def plot_mc_data_ccbc(
     scale: float = 1.0,
     overflow: bool = True,
     figsize: tuple[int, int] = (7, 6),
+    fig: plt.Figure | None = None,
+    ax_main: plt.Axes | None = None,
+    ax_sub: plt.Axes | None = None,
     ratio_min: float = 0.0,
     ratio_max: float = 2.0,
     ylim_scale: float = 1.5,
@@ -958,6 +983,15 @@ def plot_mc_data_ccbc(
         (use ``projected_pot / mcbnb_pot`` to move onto a target POT).
     overflow : bool, default True
         Fold out-of-range values into edge bins.
+    fig : matplotlib.figure.Figure, optional
+        Pre-created figure. Must be supplied together with ``ax_main`` and
+        ``ax_sub`` to embed this plot in an existing layout (e.g. a side-by-side
+        multi-panel figure). When any of the three is None a new figure is created.
+    ax_main : matplotlib.axes.Axes, optional
+        Pre-created upper axes. The caller is responsible for having set
+        ``sharex=ax_main`` on ``ax_sub`` when constructing the axes.
+    ax_sub : matplotlib.axes.Axes, optional
+        Pre-created lower (ratio) axes.
     signal_label, bkg_label : str
         Legend labels for the two stack categories.
     signal_color, bkg_color : str
@@ -980,9 +1014,7 @@ def plot_mc_data_ccbc(
         ``out_dict`` contains ``ccbc_cov``, ``constrained_bkg``,
         ``cov_ms_ms``, and ``total_cov`` for downstream reuse.
     """
-    from .syst import get_syst
-    from .ccbc import ccbc_cov_from_universes, get_constrained_background
-    from .utils import get_hist1d, ensure_lexsorted
+    from .ccbc import ccbc_cov_from_universes, ccbc_cov_from_outputs, get_constrained_background
 
     mc_df      = ensure_lexsorted(mc_df,      axis=1)
     side_mc_df = ensure_lexsorted(side_mc_df, axis=1)
@@ -1016,7 +1048,6 @@ def plot_mc_data_ccbc(
     data_stat_nc = np.diag(_data_nc_raw / scale)
     if ccbc_cov is None:
         if _use_outputs:
-            from .ccbc import ccbc_cov_from_outputs
             ccbc_cov = ccbc_cov_from_outputs(
                 Ps_output, Bs_output, nc_output,
                 allowed_keys=allowed_keys,
@@ -1066,10 +1097,11 @@ def plot_mc_data_ccbc(
     total_err = np.sqrt(np.clip(np.diag(total_cov), 0.0, None))
 
     # --- Draw ---
-    fig = plt.figure(figsize=figsize)
-    gs     = GridSpec(2, 1, height_ratios=[6, 1], hspace=0.05)
-    ax_main = fig.add_subplot(gs[0])
-    ax_sub  = fig.add_subplot(gs[1], sharex=ax_main)
+    if fig is None or ax_main is None or ax_sub is None:
+        fig = plt.figure(figsize=figsize)
+        gs      = GridSpec(2, 1, height_ratios=[6, 1], hspace=0.05)
+        ax_main = fig.add_subplot(gs[0])
+        ax_sub  = fig.add_subplot(gs[1], sharex=ax_main)
 
     alpha  = 0.4
     nbins  = len(bins) - 1
@@ -1102,8 +1134,8 @@ def plot_mc_data_ccbc(
                          edgecolor=mpl.colors.to_rgba(signal_color, 1.0),
                          lw=1.5, label=signal_label)
 
-    _err_label = ("MC stat.+syst. (w/ CCBC)" if _use_outputs
-                  else "MC stat.+syst.\n(GENIE+Flux+G4, w/ CCBC)")
+    _err_label = ("MC+Offbeam\nTotal Uncertainty" if _use_outputs
+                  else "MC stat.+syst.\n(GENIE+Flux+G4)")
     _draw_step_band(ax_main, bins, total_err, center=tot_step,
                     color=mpl.colors.to_rgba("gray", 0.75),
                     lw=0.0, facecolor="none", hatch="xxx",
@@ -1117,7 +1149,7 @@ def plot_mc_data_ccbc(
                         else f" ({np.sum(data_hist):.2e})")
     ax_main.errorbar(bin_centers, data_hist, yerr=data_err,
                      fmt='.', color='black', zorder=1e3,
-                     label="data" + data_count_label)
+                     label="Data" + data_count_label)
 
     # Ratio panel.
     mc_tot = (sig_hist + bkg_hist)
@@ -1180,9 +1212,9 @@ def plot_mc_data_ccbc(
             ann_lines.append(rf"$\chi^2$/ndf = {chi2:.2f}/{nbins}, $p$ = {p_str}")
 
     _var_str = var if isinstance(var, str) else '_'.join(str(v) for v in var)
-    ax_sub.set_xlabel(_var_str if xlabel == "" else xlabel, fontsize=12)
+    ax_sub.set_xlabel(_var_str if xlabel == "" else xlabel,)# fontsize=12)
     ax_main.set_xlabel("")
-    ax_main.set_ylabel("Events" if ylabel == "" else ylabel, fontsize=12)
+    ax_main.set_ylabel("Events" if ylabel == "" else ylabel,)# fontsize=12)
     ax_main.set_title(_var_str if title == "" else title)
     plt.setp(ax_main.get_xticklabels(), visible=False)
     ax_main.tick_params(axis='x', which='both', bottom=True, top=False)
@@ -1205,47 +1237,12 @@ def plot_mc_data_ccbc(
         _leg_kw.update(legend_kwargs)
     ax_main.legend(**_leg_kw).set_zorder(_TEXT_ZORDER)
     if data_first:
-        handles, labels = ax_main.get_legend_handles_labels()
-        idx = next((i for i, l in enumerate(labels) if l.startswith('data')), None)
-        if idx is not None and idx != 0:
-            order = [idx] + [i for i in range(len(labels)) if i != idx]
-            ax_main.legend(
-                [handles[i] for i in order], [labels[i] for i in order], **_leg_kw
-            ).set_zorder(_TEXT_ZORDER)
-    annotate_sbnd(ax_main, internal=internal)
+        _reorder_legend_data_first(ax_main, _leg_kw)
+    # annotate_sbnd(ax_main, internal=internal)
 
-    # Position annotation below the legend (mirrors plot_mc_data).
     if annot and ann_lines:
-        fig.canvas.draw()
-        legend_loc  = str((_leg_kw).get('loc', '')).lower()
-        main_legend = ax_main.get_legend()
-        if main_legend is not None:
-            renderer     = fig.canvas.get_renderer()
-            legend_box   = main_legend.get_window_extent(renderer).transformed(ax_main.transAxes.inverted())
-            ann_fontsize = main_legend.get_texts()[0].get_fontsize() if main_legend.get_texts() else 'small'
-        else:
-            legend_box, ann_fontsize = None, 'small'
-        if 'right' in legend_loc:
-            anchor_right = True
-        elif 'left' in legend_loc or 'center' in legend_loc:
-            anchor_right = False
-        else:
-            anchor_right = legend_box is not None and legend_box.x0 > 0.5
-        if legend_box is not None:
-            ann_x, ann_y = (legend_box.x1 if anchor_right else legend_box.x0), legend_box.y0
-        else:
-            ann_x, ann_y = (0.98, 0.98) if anchor_right else (0.02, 0.98)
-        ann_ha = 'right' if anchor_right else 'left'
-        ax_main.annotate(
-            "\n".join(ann_lines),
-            xy=(ann_x, ann_y),
-            xycoords=ax_main.transAxes,
-            xytext=(0, -6), textcoords='offset points',
-            ha=ann_ha, va='top', fontsize=ann_fontsize,
-            zorder=_TEXT_ZORDER,
-            bbox=dict(boxstyle='round,pad=0.2', facecolor='white',
-                      edgecolor='none', alpha=0.5),
-        )
+        _annotate_below_legend(fig, ax_main, "\n".join(ann_lines),
+                               legend_loc=str(_leg_kw.get('loc', '')).lower())
 
     if savefig:
         plt.savefig(savefig, bbox_inches='tight')
@@ -1341,7 +1338,7 @@ def plot_detvar(
     ax_main.set_ylabel(ylabel)
     ax_main.set_title(key)
     ax_main.legend()
-    annotate_sbnd(ax_main, internal=internal)
+    # annotate_sbnd(ax_main, internal=internal)
 
     if bin_labels is not None:
         ax_main.set_xticks(bins)
