@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 
 from .utils import ensure_lexsorted, apply_event_mask
 from .io import load_dfs
@@ -23,6 +23,10 @@ __all__ = [
     'format_chisq_label',
     'add_uncertainty',
     'add_fractional_uncertainty',
+    'add_beam_exposure_unc',
+    'add_ntargets_unc',
+    'add_offbeam_stat_unc',
+    'add_cosmic_unc',
     'get_intime_cov',
     'get_total_cov',
     'load_detvar_dicts',
@@ -96,6 +100,26 @@ def _sum_covs(syst_dict, n_bins):
                start=np.zeros((n_bins, n_bins)))
 
 
+@dataclass
+class _Acc:
+    """Per-target accumulator: syst dict, running covariance, and frame list."""
+    n_bins: int
+    syst_dict: dict = field(default_factory=dict)
+    frames: list = field(default_factory=list)
+    total_cov: np.ndarray = field(init=False)
+
+    def __post_init__(self):
+        self.total_cov = np.zeros((self.n_bins, self.n_bins))
+
+    def absorb(self, syst_dict, cov, df):
+        self.syst_dict.update(syst_dict)
+        self.total_cov += cov
+        self.frames.append(df)
+
+    def syst_df(self, empty_template):
+        return pd.concat(self.frames, ignore_index=True) if self.frames else empty_template.copy()
+
+
 def _collect_systs(indf, reco_var, bins, mcbnb_pot, hist_cv, xsec_inputs=None):
     syst_dict = get_syst(reco_df=indf, reco_var=reco_var, bins=bins,
                          mcbnb_pot=mcbnb_pot, xsec_inputs=xsec_inputs)
@@ -104,8 +128,12 @@ def _collect_systs(indf, reco_var, bins, mcbnb_pot, hist_cv, xsec_inputs=None):
 
 def _collect_detvar_systs(detvar_dict, reco_var, bins, event_type, cuts, select_kwargs,
                           rate_hist_cv, xsec_hist_cv=None, mcbnb_pot=1.0):
-    # 'cov' rescaled to events² at mcbnb_pot; 'hists'/'hist_cv' left raw.
+    # 'cov' rescaled to events² at mcbnb_pot; 'hists'/'hist_cv' left raw
+    # (ccbc.py:_rescale_detvar applies mcbnb_pot at cross_cov time).
     # 'single_bin_unc' is a sigma (units of events), so scales linearly.
+    # 'single_bin_hists' is a rate (events), also scales linearly, but its
+    # companion 'hist_cv' is left raw so the scaled hists must be paired with
+    # a scaled cv when consumed; here we leave it raw for parity with 'hists'.
     raw_dict = get_detvar_systs(detvar_dict, reco_var, bins,
                                 event_type=event_type, cuts=cuts, **select_kwargs)
     syst_dict = {
@@ -156,9 +184,7 @@ def add_uncertainty(
     unc: np.ndarray | None = None,
     hists: np.ndarray | None = None,
     sum_value: float | None = None,
-    unc_xsec: np.ndarray | None = None,
     sum_value_xsec: float | None = None,
-    top5: bool = False,
 ):
     """
     Add a user-defined covariance contribution to a SystematicsOutput.
@@ -187,9 +213,6 @@ def add_uncertainty(
     sum_value
         Optional normalization fraction for the RATE row (``unc_norm`` column).
         Defaults to sqrt(sum_ij cov[i,j]) / sum(rate_hist_cv).
-    unc_xsec
-        Optional per-bin fractional uncertainty array for the XSEC row.
-        Defaults to sqrt(diag(cov))/xsec_hist_cv.
     sum_value_xsec
         Optional normalization fraction for the XSEC row.
         Defaults to sqrt(sum_ij cov[i,j]) / sum(xsec_hist_cv).
@@ -203,8 +226,6 @@ def add_uncertainty(
         Shape must be (nbins, nuniverses) or (nbins,).
         Each syst dict entry also always receives a ``hist_cv`` key containing
         the per-target central-value histogram (``rate_hist_cv`` or ``xsec_hist_cv``).
-    top5
-        Value for the `top5` column in the added row.
     """
     if not key:
         raise ValueError("key must be a non-empty string")
@@ -251,19 +272,32 @@ def add_uncertainty(
             "unc_diag": [unc_arr],
             "unc_diag_avg": [float(np.mean(unc_arr))],
             "unc_norm": [sum_val],
-            "top5": [top5],
+            "top5": [False],
         })
 
-    def _make_entry(cv):
+    def _make_entry(cv, single_bin_unc_override=None):
+        sbu = (single_bin_unc_override
+               if single_bin_unc_override is not None
+               else float(np.sqrt(max(0.0, float(cov.sum())))))
         entry = {
             "cov": cov,
             "cov_frac": get_fractional_covariance(cov, cv),
             "corr": get_corr_from_cov(cov),
             "hist_cv": cv,
-            "single_bin_unc": float(np.sqrt(max(0.0, float(cov.sum())))),
+            "single_bin_unc": sbu,
         }
         if hists is not None:
             entry["hists"] = hists
+            # Synthesize a single +1σ universe consistent with this entry's own
+            # hist_cv and single_bin_unc. Guarantees
+            # Var(single_bin_hists - hist_cv.sum()) == single_bin_unc² regardless
+            # of whether 'hists' was provided in rate- or xsec-scale (Cosmic passes
+            # rate-scale intime_hists but is stored in both rate and xsec dicts).
+            # Only added when 'hists' was provided: cov-only entries (data-stat
+            # uncertainties like OffbeamStat) intentionally have no
+            # 'single_bin_hists', so downstream code treats them via cov summation
+            # and does not fake correlations across CCBC regions.
+            entry["single_bin_hists"] = np.array([[float(cv.sum()) + sbu]])
         return entry
 
     def _apply_target(self_cov, self_df, self_dict, cv, unc_arg, sum_arg, name):
@@ -275,10 +309,13 @@ def add_uncertainty(
             if u.shape != cv.shape:
                 raise ValueError(f"{name} unc shape {u.shape} != cv shape {cv.shape}")
         s = _default_sum_value(cv) if sum_arg is None else float(sum_arg)
+        # When sum_arg is explicit (e.g. cosmics use intime_sigma_norm), store the
+        # matching absolute sigma in single_bin_unc so the dict and df stay consistent.
+        sbu = float(s * float(cv.sum())) if sum_arg is not None else None
         return {
             f"{name}_cov": self_cov + cov,
             f"{name}_syst_df": pd.concat([self_df, _make_row(u, s)], ignore_index=True),
-            f"{name}_syst_dict": {**self_dict, key: _make_entry(cv)},
+            f"{name}_syst_dict": {**self_dict, key: _make_entry(cv, sbu)},
         }
 
     updates = {}
@@ -289,7 +326,7 @@ def add_uncertainty(
     if target in {"xsec", "both"}:
         updates.update(_apply_target(result.xsec_cov, result.xsec_syst_df,
                                      result.xsec_syst_dict, result.xsec_hist_cv,
-                                     unc_xsec, sum_value_xsec, "xsec"))
+                                     None, sum_value_xsec, "xsec"))
 
     return replace(result, **updates)
 
@@ -355,6 +392,94 @@ def add_fractional_uncertainty(
         unc=frac_unc, sum_value=float(np.mean(frac_unc)),
         hists=hists,
     )
+
+def add_beam_exposure_unc(
+    result: SystematicsOutput,
+    frac_unc: float = POT_NORM_UNC,
+) -> SystematicsOutput:
+    """Add a flat beam exposure (POT counting) normalization uncertainty.
+
+    Fully correlated across bins. Applied to both rate and xsec when xsec
+    is present. Defaults to :data:`~nueana.analysis.POT_NORM_UNC`.
+    """
+    return add_fractional_uncertainty(result=result, frac_unc=frac_unc,
+                                      key="BeamExposure", category="BeamExposure")
+
+
+def add_ntargets_unc(
+    result: SystematicsOutput,
+    frac_unc: float = NTARGETS_UNC,
+) -> SystematicsOutput:
+    """Add a flat number-of-argon-targets normalization uncertainty.
+
+    Fully correlated across bins. Applied to both rate and xsec when xsec
+    is present. Defaults to :data:`~nueana.analysis.NTARGETS_UNC`.
+    """
+    return add_fractional_uncertainty(result=result, frac_unc=frac_unc,
+                                      key="NTargets", category="NTargets")
+
+
+def add_offbeam_stat_unc(
+    result: SystematicsOutput,
+    mc_df: pd.DataFrame,
+    weights: np.ndarray,
+    reco_var,
+    bins,
+) -> SystematicsOutput:
+    """Add offbeam-data statistical uncertainty as a diagonal covariance.
+
+    The per-bin variance is the sum of squared weights over offbeam-tagged
+    events (``signal == signal_dict['offbeam']``). Recorded under
+    ``category="MCstat"``, ``subcategory="OffbeamStat"``. When no offbeam
+    events are present a zero row is still added for column completeness.
+    """
+    offbeam_mask = mc_df.signal.values == signal_dict['offbeam']
+    if offbeam_mask.any():
+        var_per_bin = get_hist1d(
+            data=mc_df[offbeam_mask][reco_var],
+            weights=weights[offbeam_mask] ** 2,
+            bins=bins,
+        )
+    else:
+        var_per_bin = np.zeros(result.rate_hist_cv.size, dtype=float)
+    return add_uncertainty(
+        result=result,
+        cov=np.diag(var_per_bin),
+        key="OffbeamStat",
+        category="MCstat",
+        subcategory="OffbeamStat",
+        target="both" if result.has_xsec else "rate",
+    )
+
+
+def add_cosmic_unc(
+    result: SystematicsOutput,
+    intime_cov: np.ndarray,
+    intime_hists: np.ndarray,
+    intime_sigma_norm: float,
+) -> SystematicsOutput:
+    """Add the in-time cosmic-ray uncertainty from :func:`get_intime_cov`.
+
+    ``intime_cov`` is applied to both rate and xsec (when present). The
+    ``unc_norm`` row entry uses ``intime_sigma_norm`` divided by the
+    per-target central-value sum, not the diagonal of ``intime_cov``.
+    """
+    def _safe_norm(sigma, cv_sum):
+        return float(sigma / cv_sum) if cv_sum and cv_sum > 0 else 0.0
+
+    cv_rate = float(result.rate_hist_cv.sum())
+    cv_xsec = float(result.xsec_hist_cv.sum()) if result.has_xsec else None
+    return add_uncertainty(
+        result=result,
+        cov=np.asarray(intime_cov, dtype=float),
+        key="Cosmic",
+        category="Cosmic",
+        target="both" if result.has_xsec else "rate",
+        hists=intime_hists[:, np.newaxis],
+        sum_value=_safe_norm(intime_sigma_norm, cv_rate),
+        sum_value_xsec=_safe_norm(intime_sigma_norm, cv_xsec) if result.has_xsec else None,
+    )
+
 
 def get_intime_cov(selected_df, var, bins,
                    mcbnb_ngen,
@@ -558,26 +683,18 @@ def get_total_cov(reco_df, reco_var, bins, mcbnb_pot,
     _fpw = sorted_df.weights_mc.values
     rate_hist_cv = get_hist1d(data=sorted_df[reco_var], weights=_fpw, bins=bins)
     signal_mask = sorted_df.signal == 0
+    # backgr-subtracted xsec histogram (signal only) for xsec systematics
     xsec_hist_cv = get_hist1d(data=sorted_df[signal_mask][reco_var], weights=_fpw[signal_mask], bins=bins)
 
     empty_syst_df = pd.DataFrame(columns=["key", "category", "subcategory", "unc_diag", "unc_diag_avg", "unc_norm", "top5"])
-    n_bins = rate_hist_cv.size
-
-    rate_syst_dict: dict = {}
-    rate_total_cov = np.zeros((n_bins, n_bins))
-    rate_syst_frames: list[pd.DataFrame] = []
-
-    xsec_syst_dict: dict = {}
-    xsec_total_cov = np.zeros((n_bins, n_bins))
-    xsec_syst_frames: list[pd.DataFrame] = []
+    rate = _Acc(rate_hist_cv.size)
+    xsec = _Acc(rate_hist_cv.size)
 
     if include_rate:
-        d, c, df = _collect_systs(sorted_df, reco_var, bins, mcbnb_pot, rate_hist_cv)
-        rate_syst_dict.update(d); rate_total_cov += c; rate_syst_frames.append(df)
+        rate.absorb(*_collect_systs(sorted_df, reco_var, bins, mcbnb_pot, rate_hist_cv))
 
     if include_xsec:
-        d, c, df = _collect_systs(sorted_df, reco_var, bins, mcbnb_pot, xsec_hist_cv, xsec_inputs)
-        xsec_syst_dict.update(d); xsec_total_cov += c; xsec_syst_frames.append(df)
+        xsec.absorb(*_collect_systs(sorted_df, reco_var, bins, mcbnb_pot, xsec_hist_cv, xsec_inputs))
 
     if include_detv:
         d, c, rate_df, xsec_df = _collect_detvar_systs(
@@ -585,9 +702,9 @@ def get_total_cov(reco_df, reco_var, bins, mcbnb_pot,
             xsec_hist_cv=xsec_hist_cv if include_xsec else None,
             mcbnb_pot=mcbnb_pot,
         )
-        rate_syst_dict.update(d); rate_total_cov += c; rate_syst_frames.append(rate_df)
+        rate.absorb(d, c, rate_df)
         if include_xsec:
-            xsec_syst_dict.update(d); xsec_total_cov += c; xsec_syst_frames.append(xsec_df)
+            xsec.absorb(d, c, xsec_df)
 
     if include_rate or include_xsec:
         if data_df is not None:
@@ -616,12 +733,9 @@ def get_total_cov(reco_df, reco_var, bins, mcbnb_pot,
             )
 
         if include_rate:
-            rate_syst_frames.append(_data_stat_row(rate_hist_cv))
+            rate.frames.append(_data_stat_row(rate_hist_cv))
         if include_xsec:
-            xsec_syst_frames.append(_data_stat_row(xsec_hist_cv))
-
-    rate_syst_df = pd.concat(rate_syst_frames, ignore_index=True) if rate_syst_frames else empty_syst_df.copy()
-    xsec_syst_df = pd.concat(xsec_syst_frames, ignore_index=True) if xsec_syst_frames else empty_syst_df.copy()
+            xsec.frames.append(_data_stat_row(xsec_hist_cv))
 
     intime_cov = None
     intime_hists = None
@@ -635,52 +749,25 @@ def get_total_cov(reco_df, reco_var, bins, mcbnb_pot,
 
     result = SystematicsOutput(
         rate_hist_cv=rate_hist_cv,
-        rate_cov=rate_total_cov,
-        rate_syst_df=rate_syst_df,
-        rate_syst_dict=rate_syst_dict,
+        rate_cov=rate.total_cov,
+        rate_syst_df=rate.syst_df(empty_syst_df),
+        rate_syst_dict=rate.syst_dict,
         mcbnb_pot=mcbnb_pot,
         data_pot=data_pot,
         xsec_hist_cv=xsec_hist_cv if include_xsec else None,
-        xsec_cov=xsec_total_cov if include_xsec else None,
-        xsec_syst_df=xsec_syst_df if include_xsec else None,
-        xsec_syst_dict=xsec_syst_dict if include_xsec else None,
+        xsec_cov=xsec.total_cov if include_xsec else None,
+        xsec_syst_df=xsec.syst_df(empty_syst_df) if include_xsec else None,
+        xsec_syst_dict=xsec.syst_dict if include_xsec else None,
     )
 
-    offbeam_mask = sorted_df.signal.values == signal_dict['offbeam']
-    if offbeam_mask.any():
-        offbeam_var_per_bin = get_hist1d(
-            data=sorted_df[offbeam_mask][reco_var],
-            weights=_fpw[offbeam_mask] ** 2,
-            bins=bins,
-        )
-    else: 
-        offbeam_var_per_bin = np.zeros(n_bins, dtype=float)
-    result = add_uncertainty(
-        result=result,
-        cov=np.diag(offbeam_var_per_bin),
-        key="OffbeamStat",
-        category="MCstat",
-        subcategory="OffbeamStat",
-        target="both" if result.has_xsec else "rate",
-    )
+    result = add_offbeam_stat_unc(result, sorted_df, _fpw, reco_var, bins)
 
     if include_norm:
-        result = add_fractional_uncertainty(result=result, frac_unc=pot_norm_unc,
-                                            key="BeamExposure", category="BeamExposure")
-        result = add_fractional_uncertainty(result=result, frac_unc=ntargets_unc,
-                                            key="NTargets", category="NTargets")
+        result = add_beam_exposure_unc(result, pot_norm_unc)
+        result = add_ntargets_unc(result, ntargets_unc)
 
     if include_cosmic and intime_cov is not None:
-        _cv_rate = float(rate_hist_cv.sum())
-        _cv_xsec = float(xsec_hist_cv.sum()) if result.has_xsec else None
-        result = add_uncertainty(
-            result=result, cov=np.asarray(intime_cov, dtype=float),
-            key="Cosmic", category="Cosmic",
-            target="both" if result.has_xsec else "rate",
-            hists=intime_hists[:, np.newaxis],
-            sum_value=intime_sigma_norm / _cv_rate if _cv_rate > 0 else 0.0,
-            sum_value_xsec=(intime_sigma_norm / _cv_xsec if _cv_xsec and _cv_xsec > 0 else 0.0) if result.has_xsec else None,
-        )
+        result = add_cosmic_unc(result, intime_cov, intime_hists, intime_sigma_norm)
 
     return result
 
