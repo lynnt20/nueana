@@ -15,6 +15,7 @@ from . import detvar
 from . import exclusive
 from . import fdt
 from . import ccbc
+from . import generators
 
 from .utils import *
 from .io import *
@@ -29,6 +30,7 @@ from .detvar import *
 from .exclusive import *
 from .fdt import *
 from .ccbc import *
+from .generators import *
 
 # This allows both:
 # import nueana; nueana.cutPreselection(df)
