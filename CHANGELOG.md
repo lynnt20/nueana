@@ -5,6 +5,21 @@ top each time changes are merged that other users should know about.
 
 ---
 
+## 2026-08-12 — Split `fdt` into `unfold` and `fdt` modules
+
+### Breaking change
+
+**`nueana.fdt.UnfoldInput` / `nueana.fdt.get_response_matrix` / `nueana.fdt.plot_unfolded_result` moved to `nueana.unfold`**
+
+The unfolding infrastructure has been split out of `fdt.py` into a new
+`unfold.py` module. All top-level names (`nue.UnfoldInput`, etc.) are
+unchanged — only submodule-qualified access breaks.
+
+`nueana.fdt` now contains only FDT-specific functions:
+`make_fake_data_hists`, `run_random_background_fdt`, `plot_random_background_fdt`.
+
+---
+
 ## 2026-07-17 — Random background FDT ensemble, CCBC data-stat softening, off-beam uncertainty
 
 ### New features

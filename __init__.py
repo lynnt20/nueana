@@ -13,6 +13,7 @@ from . import funcs
 from . import preprocess
 from . import detvar
 from . import exclusive
+from . import unfold
 from . import fdt
 from . import ccbc
 from . import generators
@@ -28,6 +29,7 @@ from .funcs import *
 from .preprocess import *
 from .detvar import *
 from .exclusive import *
+from .unfold import *
 from .fdt import *
 from .ccbc import *
 from .generators import *
