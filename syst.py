@@ -4,7 +4,7 @@ Systematic and statistical uncertainty utilities.
 Conventions
 -----------
 - All output histograms and covariance matrices are **flux-normalized by default**.
-Functions that support disabling this accept a `scale=True` parameter.
+  Pass ``scale=False`` to disable; ``scale=True`` (default) applies ``weights_mc`` scaling.
 - Covariance matrices are normalized by N_universes.
 - NaN weights (e.g., GENIE weights for true cosmics) are replaced with 1.0.
 """
@@ -292,7 +292,9 @@ def get_syst_hists(reco_df: pd.DataFrame,
     """
     reco_df = ensure_lexsorted(reco_df, axis=1)
 
-    unisim_col, multisig_col, multisim_col = [], [], []
+    unisim_col  = []
+    multisig_col = []
+    multisim_col = []
     univ_level = -1
 
     for col in reco_df.columns:
@@ -322,6 +324,9 @@ def get_syst_hists(reco_df: pd.DataFrame,
     reco_idx = digitize_with_overflow(reco_df[reco_var], bins)
     cv       = np.bincount(reco_idx, weights=scaling, minlength=n_out).astype(float)
     syst_dict = {}
+
+    if univ_level < 0:
+        return syst_dict, cv
 
     # Pre-compute xsec digitized indices — constant across all xsec knobs
     _xsec = None
@@ -363,6 +368,7 @@ def get_syst_hists(reco_df: pd.DataFrame,
             response = None
             sb_hists = None
             if is_xsec(col, xsec_inputs):
+                assert _xsec is not None  # guaranteed by the _xsec initialization block above
                 true_signal_weights = xsec_inputs.true_signal_df[col[2:]].values.astype(np.float64) * xsec_inputs.true_signal_scale
                 tsw = true_signal_weights.reshape(-1, 1)
                 w_sig = weights[_xsec['sig_mask']].reshape(-1, 1)
@@ -402,6 +408,7 @@ def get_syst_hists(reco_df: pd.DataFrame,
             response = None
             sb_hists = None
             if is_xsec(col, xsec_inputs):
+                assert _xsec is not None  # guaranteed by the _xsec initialization block above
                 true_signal_ps1 = np.nan_to_num(xsec_inputs.true_signal_df[ps1_col[2:]].values.astype(np.float64), copy=False, nan=1.0)
                 true_signal_ms1 = np.nan_to_num(xsec_inputs.true_signal_df[ms1_col[2:]].values.astype(np.float64), copy=False, nan=1.0)
                 true_signal_weights = np.stack([true_signal_ps1, true_signal_ms1]).T * xsec_inputs.true_signal_scale
@@ -441,6 +448,7 @@ def get_syst_hists(reco_df: pd.DataFrame,
             response = None
             sb_hists = None
             if is_xsec(col, xsec_inputs):
+                assert _xsec is not None  # guaranteed by the _xsec initialization block above
                 true_signal_weights = xsec_inputs.true_signal_df[col[2:]].values.astype(np.float64) * xsec_inputs.true_signal_scale
                 w_sig = weights[_xsec['sig_mask']]
                 w_bkg = weights[~_xsec['sig_mask']]
@@ -487,14 +495,17 @@ def get_syst(*args, save_response: bool = False, **kwargs) -> dict:
         syst_dict[key]['cov_frac'] = cov_frac
         syst_dict[key]['corr'] = corr
 
-        # xsec entries store single-bin universe hists (response method applied at
-        # n_bins=1) because sum-over-bins of the multi-bin cov is not the
-        # integrated variance under smearing. Non-xsec entries can use sum(cov).
-        if 'single_bin_hists' in syst_dict[key]:
-            sb = syst_dict[key].pop('single_bin_hists').ravel().astype(float)
-            syst_dict[key]['single_bin_unc'] = float(np.sqrt(np.mean((sb - cv_sb) ** 2)))
-        else:
-            syst_dict[key]['single_bin_unc'] = float(np.sqrt(max(0.0, float(cov.sum()))))
+        # Every entry carries a per-universe integrated event rate ('single_bin_hists',
+        # shape (1, nuniv)) and a scalar sigma ('single_bin_unc') consistent with it.
+        # xsec entries use the response method applied at n_bins=1 (populated earlier),
+        # because sum-over-bins of multi-bin xsec cov is not the integrated variance
+        # under smearing. Non-xsec entries can just sum universes across bins.
+        if 'single_bin_hists' not in syst_dict[key]:
+            syst_dict[key]['single_bin_hists'] = np.asarray(
+                syst_dict[key]['hists'], dtype=float
+            ).sum(axis=0, keepdims=True)
+        sb = np.asarray(syst_dict[key]['single_bin_hists']).ravel().astype(float)
+        syst_dict[key]['single_bin_unc'] = float(np.sqrt(np.mean((sb - cv_sb) ** 2)))
 
     return syst_dict
 
@@ -635,13 +646,16 @@ def get_detvar_systs(detvar_dict, var, bins,
 
         cov, cov_frac, corr = calc_matrices(var_arr=dv_hists, cv=cv_hist)
         out_key = key if key.startswith("DetVar_") else f"DetVar_{key}"
+        sb_hists = dv_hists.sum(axis=0, keepdims=True)
+        cv_sb    = float(cv_hist.sum())
         matrices_dict[out_key] = {
-            'hists':    dv_hists,
-            'cov':      cov,
-            'cov_frac': cov_frac,
-            'corr':     corr,
-            'hist_cv':  cv_hist,
-            'single_bin_unc': float(np.sqrt(max(0.0, float(cov.sum())))),
+            'hists':            dv_hists,
+            'cov':              cov,
+            'cov_frac':         cov_frac,
+            'corr':             corr,
+            'hist_cv':          cv_hist,
+            'single_bin_hists': sb_hists,
+            'single_bin_unc':   float(np.sqrt(np.mean((sb_hists.ravel() - cv_sb) ** 2))),
         }
     return matrices_dict
 
@@ -740,7 +754,7 @@ def _classify_detvar_subcategory(detvar_key: str) -> str:
     for subcategory, keywords in _DETVAR_SUBCATEGORIES:
         if any(kw.lower() in key for kw in keywords):
             return subcategory
-    if "r" in tokens:
+    if "r" in tokens:  # recombination knobs use "r" as a standalone alpha/beta token
         return "calorimetry"
     return "other"
 
@@ -783,7 +797,7 @@ def get_syst_df(dicts: list, cv_hist: np.ndarray) -> pd.DataFrame:
 
             category = _classify_category(raw_key)
             if category is None:
-                print(f"Warning: category not found for key '{raw_key}'")
+                warnings.warn(f"category not found for key '{raw_key}'", stacklevel=2)
                 records.append({
                     "key": raw_key, "category": "Other", "subcategory": "Other",
                     "unc_diag": unc_diag, "unc_diag_avg": float(np.mean(unc_diag)), "unc_norm": unc_norm,
@@ -960,6 +974,8 @@ def make_multiverse_weights(evtdf, knob_list, n_univs=100, evt_prefix=None, nudf
     nudf_nlevels  = nudf.columns.nlevels
     evtdf_nlevels = evtdf.columns.nlevels
     nudf_in_evtdf = nudf.index.isin(evtdf.index)
+    evtdf_in_nudf = evtdf.index.isin(nudf.index)
+    evtdf_overlap_index = evtdf.index[evtdf_in_nudf]
 
     for knob in knob_list:
         if "multisim" in knob or knob not in nudf_univ_keys:
@@ -971,7 +987,9 @@ def make_multiverse_weights(evtdf, knob_list, n_univs=100, evt_prefix=None, nudf
         synced_vals = nudf.loc[nudf_in_evtdf, nudf_univ_cols]
         if synced_vals.isna().any().any():
             print(f"Found NaN values in synced_vals for knob: {knob}")
-        evtdf[evtdf_univ_cols] = synced_vals
+        # Reindex to evtdf's ordering of overlapping rows, then assign by position
+        # so that evtdf rows absent from nudf keep their independently-generated weights.
+        evtdf.loc[evtdf_in_nudf, evtdf_univ_cols] = synced_vals.reindex(evtdf_overlap_index).values
 
     if drop_originals:
         if evtdf_cols_to_drop:
